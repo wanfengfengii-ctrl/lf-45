@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import {
   AppShell,
   Container,
@@ -14,6 +14,8 @@ import {
   SimpleGrid,
   Modal,
   TextInput,
+  Drawer,
+  ScrollArea,
 } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import {
@@ -32,6 +34,7 @@ import {
   IconChartBar,
   IconReport,
   IconUpload,
+  IconHistory,
 } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 
@@ -41,8 +44,10 @@ import { SurveyPlanManager } from '@/components/SurveyPlanManager';
 import { BatchInputModal } from '@/components/BatchInputModal';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
 import { AnalysisReportModal } from '@/components/AnalysisReportModal';
+import { HistoryPlaybackPanel } from '@/components/HistoryPlaybackPanel';
 import { useSurveyPlans } from '@/hooks/useSurveyPlans';
-import type { AxisLine, BearingResult } from '@/types';
+import { useHistory } from '@/hooks/useHistory';
+import type { AxisLine, BearingResult, OperationSnapshot } from '@/types';
 import {
   pointsToAngle,
   calculateBearingResult,
@@ -69,6 +74,8 @@ function App() {
     duplicatePlan,
   } = useSurveyPlans();
 
+  const history = useHistory();
+
   const [rotation, setRotation] = useState(0);
   const [isDrawingMode, setIsDrawingMode] = useState(false);
   const [axes, setAxes] = useState<AxisLine[]>([]);
@@ -79,9 +86,60 @@ function App() {
   const [showHelp, { open: openHelp, close: closeHelp }] = useDisclosure(false);
   const [batchInputModalOpen, { open: openBatchInput, close: closeBatchInput }] = useDisclosure(false);
   const [analysisReportModalOpen, { open: openAnalysisReport, close: closeAnalysisReport }] = useDisclosure(false);
+  const [historyDrawerOpen, { open: openHistoryDrawer, close: closeHistoryDrawer }] = useDisclosure(false);
+
+  const lastRotationRef = useRef(rotation);
+  const lastDeclinationRef = useRef(activePlan?.magneticDeclination ?? 0);
+  const lastThresholdRef = useRef(activePlan?.errorThreshold ?? DEFAULT_ERROR_THRESHOLD);
+  const isApplyingSnapshotRef = useRef(false);
 
   const magneticDeclination = activePlan?.magneticDeclination ?? 0;
   const errorThreshold = activePlan?.errorThreshold ?? DEFAULT_ERROR_THRESHOLD;
+
+  const getCurrentSnapshot = useCallback((): OperationSnapshot => {
+    return history.createSnapshot({
+      rotation,
+      magneticDeclination,
+      errorThreshold,
+      isDrawingMode,
+      axes,
+      activePlan,
+    });
+  }, [history, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes, activePlan]);
+
+  const applySnapshot = useCallback((snapshot: OperationSnapshot) => {
+    isApplyingSnapshotRef.current = true;
+
+    setRotation(snapshot.rotation);
+    lastRotationRef.current = snapshot.rotation;
+
+    if (snapshot.activePlanId && snapshot.activePlanId !== activePlanId) {
+      setActivePlan(snapshot.activePlanId);
+    }
+
+    if (activePlanId && snapshot.activePlanId === activePlanId) {
+      updatePlan(activePlanId, {
+        magneticDeclination: snapshot.magneticDeclination,
+        errorThreshold: snapshot.errorThreshold,
+      });
+      lastDeclinationRef.current = snapshot.magneticDeclination;
+      lastThresholdRef.current = snapshot.errorThreshold;
+    }
+
+    setIsDrawingMode(snapshot.isDrawingMode);
+    setAxes(snapshot.axes);
+
+    setTimeout(() => {
+      isApplyingSnapshotRef.current = false;
+    }, 50);
+
+    notifications.show({
+      title: '已恢复状态',
+      message: `罗盘：${formatAngle(snapshot.rotation)}，磁偏角：${snapshot.magneticDeclination > 0 ? '+' : ''}${snapshot.magneticDeclination.toFixed(1)}°`,
+      color: 'teal',
+      icon: <IconCheck size={18} />,
+    });
+  }, [activePlanId, setActivePlan, updatePlan]);
 
   const currentBearingResult = useMemo<BearingResult | null>(() => {
     const rawAngle = previewAngle ?? rotation;
@@ -108,30 +166,145 @@ function App() {
   const bearingResult = pendingAxis ? selectedAxisResult : currentBearingResult;
 
   const handleRotationChange = useCallback((newRotation: number) => {
-    setRotation(clampAngle(newRotation));
-  }, []);
+    const clamped = clampAngle(newRotation);
+    const oldRotation = lastRotationRef.current;
+
+    if (!isApplyingSnapshotRef.current && Math.abs(clamped - oldRotation) > 0.01) {
+      const before = getCurrentSnapshot();
+      setRotation(clamped);
+      const after = history.createSnapshot({
+        rotation: clamped,
+        magneticDeclination,
+        errorThreshold,
+        isDrawingMode,
+        axes,
+        activePlan,
+      });
+
+      history.recordOperation({
+        type: 'rotation_change',
+        description: `罗盘旋转：${formatAngle(oldRotation)} → ${formatAngle(clamped)}`,
+        severity: 'info',
+        planId: activePlanId,
+        planName: activePlan?.name,
+        beforeSnapshot: before,
+        afterSnapshot: after,
+        payload: { before: oldRotation, after: clamped },
+      });
+    } else {
+      setRotation(clamped);
+    }
+
+    lastRotationRef.current = clamped;
+  }, [getCurrentSnapshot, history, magneticDeclination, errorThreshold, isDrawingMode, axes, activePlan, activePlanId]);
 
   const handleDeclinationChange = useCallback(
     (newDeclination: number) => {
       const clamped = clampDeclination(newDeclination);
-      if (activePlanId) {
+      const oldDeclination = lastDeclinationRef.current;
+
+      if (activePlanId && !isApplyingSnapshotRef.current && Math.abs(clamped - oldDeclination) > 0.01) {
+        const before = getCurrentSnapshot();
+        updateMagneticDeclination(activePlanId, clamped);
+        const after = history.createSnapshot({
+          rotation,
+          magneticDeclination: clamped,
+          errorThreshold,
+          isDrawingMode,
+          axes,
+          activePlan,
+        });
+
+        history.recordOperation({
+          type: 'declination_change',
+          description: `磁偏角调整：${oldDeclination > 0 ? '+' : ''}${oldDeclination.toFixed(1)}° → ${clamped > 0 ? '+' : ''}${clamped.toFixed(1)}°`,
+          severity: 'info',
+          planId: activePlanId,
+          planName: activePlan?.name,
+          beforeSnapshot: before,
+          afterSnapshot: after,
+          payload: { before: oldDeclination, after: clamped },
+        });
+      } else if (activePlanId) {
         updateMagneticDeclination(activePlanId, clamped);
       }
+
+      lastDeclinationRef.current = clamped;
     },
-    [activePlanId, updateMagneticDeclination]
+    [activePlanId, updateMagneticDeclination, getCurrentSnapshot, history, rotation, errorThreshold, isDrawingMode, axes, activePlan]
   );
 
   const handleErrorThresholdChange = useCallback(
     (newThreshold: number) => {
-      if (activePlanId) {
-        updatePlan(activePlanId, { errorThreshold: newThreshold });
+      const clamped = Math.max(0.1, newThreshold);
+      const oldThreshold = lastThresholdRef.current;
+
+      if (activePlanId && !isApplyingSnapshotRef.current && Math.abs(clamped - oldThreshold) > 0.01) {
+        const before = getCurrentSnapshot();
+        updatePlan(activePlanId, { errorThreshold: clamped });
+        const after = history.createSnapshot({
+          rotation,
+          magneticDeclination,
+          errorThreshold: clamped,
+          isDrawingMode,
+          axes,
+          activePlan,
+        });
+
+        history.recordOperation({
+          type: 'threshold_change',
+          description: `误差阈值调整：${oldThreshold.toFixed(1)}° → ${clamped.toFixed(1)}°`,
+          severity: 'info',
+          planId: activePlanId,
+          planName: activePlan?.name,
+          beforeSnapshot: before,
+          afterSnapshot: after,
+          payload: { before: oldThreshold, after: clamped },
+        });
+      } else if (activePlanId) {
+        updatePlan(activePlanId, { errorThreshold: clamped });
+      }
+
+      lastThresholdRef.current = clamped;
+    },
+    [activePlanId, updatePlan, getCurrentSnapshot, history, rotation, magneticDeclination, isDrawingMode, axes, activePlan]
+  );
+
+  const handleDrawingModeToggle = useCallback(
+    (enabled: boolean) => {
+      if (!isApplyingSnapshotRef.current && enabled !== isDrawingMode) {
+        const before = getCurrentSnapshot();
+        setIsDrawingMode(enabled);
+        const after = history.createSnapshot({
+          rotation,
+          magneticDeclination,
+          errorThreshold,
+          isDrawingMode: enabled,
+          axes,
+          activePlan,
+        });
+
+        history.recordOperation({
+          type: 'drawing_mode_toggle',
+          description: `切换${enabled ? '为绘制模式' : '为旋转模式'}`,
+          severity: 'info',
+          planId: activePlanId,
+          planName: activePlan?.name,
+          beforeSnapshot: before,
+          afterSnapshot: after,
+          payload: { enabled },
+        });
+      } else {
+        setIsDrawingMode(enabled);
       }
     },
-    [activePlanId, updatePlan]
+    [isDrawingMode, getCurrentSnapshot, history, rotation, magneticDeclination, errorThreshold, axes, activePlan, activePlanId]
   );
 
   const handleAxisDrawn = useCallback(
     (axis: AxisLine) => {
+      const before = getCurrentSnapshot();
+
       if (!axis.passesCenter) {
         notifications.show({
           title: '轴线无效',
@@ -140,7 +313,32 @@ function App() {
           icon: <IconAlertCircle size={18} />,
           autoClose: 4000,
         });
-        setAxes((prev) => [...prev, { ...axis, passesCenter: false }]);
+
+        const newAxes = [...axes, { ...axis, passesCenter: false }];
+        setAxes(newAxes);
+
+        if (!isApplyingSnapshotRef.current) {
+          const angle = pointsToAngle(axis.startPoint, axis.endPoint);
+          const after = history.createSnapshot({
+            rotation,
+            magneticDeclination,
+            errorThreshold,
+            isDrawingMode,
+            axes: newAxes,
+            activePlan,
+          });
+
+          history.recordOperation({
+            type: 'axis_draw',
+            description: `绘制无效轴线（未过中心点），角度：${formatAngle(angle)}`,
+            severity: 'warning',
+            planId: activePlanId,
+            planName: activePlan?.name,
+            beforeSnapshot: before,
+            afterSnapshot: after,
+            payload: { angle, label: '无效轴线', passesCenter: false },
+          });
+        }
         return;
       }
 
@@ -151,9 +349,36 @@ function App() {
       setAxes(newAxes);
 
       const axisNumber = axes.filter((a) => a.passesCenter).length + 1;
-      setAxisLabel(`轴线${axisNumber}`);
+      const defaultLabel = `轴线${axisNumber}`;
+      setAxisLabel(defaultLabel);
       setPendingAxis(axis);
       openSave();
+
+      if (!isApplyingSnapshotRef.current) {
+        const after = history.createSnapshot({
+          rotation,
+          magneticDeclination,
+          errorThreshold,
+          isDrawingMode,
+          axes: newAxes,
+          activePlan,
+        });
+
+        history.recordOperation({
+          type: 'axis_draw',
+          description: `绘制轴线：${defaultLabel}（${formatAngle(result.correctedBearing)}）`,
+          severity: 'info',
+          planId: activePlanId,
+          planName: activePlan?.name,
+          beforeSnapshot: before,
+          afterSnapshot: after,
+          payload: {
+            angle: result.correctedBearing,
+            label: defaultLabel,
+            passesCenter: true,
+          },
+        });
+      }
 
       notifications.show({
         title: '轴线已绘制',
@@ -162,7 +387,18 @@ function App() {
         icon: result.exceedsThreshold ? <IconAlertCircle size={18} /> : <IconCheck size={18} />,
       });
     },
-    [axes, rotation, magneticDeclination, errorThreshold, openSave]
+    [
+      axes,
+      rotation,
+      magneticDeclination,
+      errorThreshold,
+      openSave,
+      isDrawingMode,
+      activePlan,
+      activePlanId,
+      getCurrentSnapshot,
+      history,
+    ]
   );
 
   const handleSaveMeasurement = useCallback(() => {
@@ -188,9 +424,10 @@ function App() {
       ...pendingAxis,
       label: axisLabel.trim(),
     };
-    setAxes((prev) =>
-      prev.map((a) => (a.id === pendingAxis.id ? axisWithLabel : a))
-    );
+    const newAxes = axes.map((a) => (a.id === pendingAxis.id ? axisWithLabel : a));
+    setAxes(newAxes);
+
+    const before = getCurrentSnapshot();
 
     const { success, duplicate } = addMeasurement(activePlanId, {
       axisId: pendingAxis.id,
@@ -204,6 +441,37 @@ function App() {
       errorAmount: result.errorAmount,
       exceedsThreshold: result.exceedsThreshold,
     });
+
+    if (!isApplyingSnapshotRef.current && success) {
+      setTimeout(() => {
+        const updatedActivePlan = plans.find((p) => p.id === activePlanId) || activePlan;
+        const after = history.createSnapshot({
+          rotation,
+          magneticDeclination,
+          errorThreshold,
+          isDrawingMode: false,
+          axes: newAxes,
+          activePlan: updatedActivePlan,
+        });
+
+        history.recordOperation({
+          type: 'axis_save',
+          description: `保存测量「${axisLabel.trim()}」：${formatAngle(result.correctedBearing)}，误差 ${result.errorAmount.toFixed(2)}°`,
+          severity: result.exceedsThreshold ? 'warning' : 'info',
+          planId: activePlanId,
+          planName: activePlan?.name,
+          beforeSnapshot: before,
+          afterSnapshot: after,
+          payload: {
+            label: axisLabel.trim(),
+            bearing: result.correctedBearing,
+            error: result.errorAmount,
+            exceedsThreshold: result.exceedsThreshold,
+            mountain: result.mountain.name,
+          },
+        });
+      }, 10);
+    }
 
     if (duplicate) {
       notifications.show({
@@ -235,43 +503,376 @@ function App() {
     rotation,
     magneticDeclination,
     errorThreshold,
+    axes,
     addMeasurement,
     closeSave,
+    activePlan,
+    plans,
+    history,
+    getCurrentSnapshot,
   ]);
 
   const handleCancelSave = useCallback(() => {
+    const before = getCurrentSnapshot();
+    let newAxes = axes;
+
     if (pendingAxis) {
-      setAxes((prev) => prev.filter((a) => a.id !== pendingAxis.id));
+      newAxes = axes.filter((a) => a.id !== pendingAxis.id);
+      setAxes(newAxes);
     }
+
+    if (!isApplyingSnapshotRef.current && pendingAxis) {
+      const after = history.createSnapshot({
+        rotation,
+        magneticDeclination,
+        errorThreshold,
+        isDrawingMode,
+        axes: newAxes,
+        activePlan,
+      });
+
+      history.recordOperation({
+        type: 'axis_cancel',
+        description: `取消保存轴线「${axisLabel || pendingAxis.label || '未命名'}」`,
+        severity: 'info',
+        planId: activePlanId,
+        planName: activePlan?.name,
+        beforeSnapshot: before,
+        afterSnapshot: after,
+        payload: { label: axisLabel || pendingAxis.label || '未命名' },
+      });
+    }
+
     setPendingAxis(null);
     setAxisLabel('');
     closeSave();
-  }, [pendingAxis, closeSave]);
+  }, [pendingAxis, axes, closeSave, axisLabel, isDrawingMode, activePlan, activePlanId, getCurrentSnapshot, history, rotation, magneticDeclination, errorThreshold]);
 
   const handleResetCompass = useCallback(() => {
+    const before = getCurrentSnapshot();
     setRotation(0);
+    lastRotationRef.current = 0;
+
+    if (!isApplyingSnapshotRef.current) {
+      const after = history.createSnapshot({
+        rotation: 0,
+        magneticDeclination,
+        errorThreshold,
+        isDrawingMode,
+        axes,
+        activePlan,
+      });
+
+      history.recordOperation({
+        type: 'compass_reset',
+        description: '罗盘角度归零',
+        severity: 'info',
+        planId: activePlanId,
+        planName: activePlan?.name,
+        beforeSnapshot: before,
+        afterSnapshot: after,
+      });
+    }
+
     notifications.show({
       title: '罗盘已重置',
       message: '罗盘旋转角度已归零',
       color: 'blue',
       icon: <IconRotate size={18} />,
     });
-  }, []);
+  }, [getCurrentSnapshot, history, magneticDeclination, errorThreshold, isDrawingMode, axes, activePlan, activePlanId]);
 
   const handleClearAxes = useCallback(() => {
+    const before = getCurrentSnapshot();
+    const count = axes.length;
     setAxes([]);
     setPendingAxis(null);
+
+    if (!isApplyingSnapshotRef.current && count > 0) {
+      const after = history.createSnapshot({
+        rotation,
+        magneticDeclination,
+        errorThreshold,
+        isDrawingMode,
+        axes: [],
+        activePlan,
+      });
+
+      history.recordOperation({
+        type: 'axes_clear',
+        description: `清除所有绘制轴线（${count}条）`,
+        severity: 'warning',
+        planId: activePlanId,
+        planName: activePlan?.name,
+        beforeSnapshot: before,
+        afterSnapshot: after,
+        payload: { count },
+      });
+    }
+
     notifications.show({
       title: '轴线已清除',
       message: '所有绘制的轴线已从视图中移除',
       color: 'gray',
       icon: <IconTrash size={18} />,
     });
-  }, []);
+  }, [getCurrentSnapshot, history, axes, rotation, magneticDeclination, errorThreshold, isDrawingMode, activePlan, activePlanId]);
+
+  const handleSetActivePlan = useCallback(
+    (planId: string) => {
+      const before = getCurrentSnapshot();
+      const oldPlanName = activePlan?.name ?? '';
+      const newPlan = plans.find((p) => p.id === planId);
+
+      setActivePlan(planId);
+
+      if (!isApplyingSnapshotRef.current) {
+        setTimeout(() => {
+          const latestPlan = plans.find((p) => p.id === planId) || newPlan;
+          const after = history.createSnapshot({
+            rotation,
+            magneticDeclination: latestPlan?.magneticDeclination ?? magneticDeclination,
+            errorThreshold: latestPlan?.errorThreshold ?? errorThreshold,
+            isDrawingMode,
+            axes,
+            activePlan: latestPlan ?? null,
+          });
+
+          history.recordOperation({
+            type: 'plan_switch',
+            description: `切换方案：${oldPlanName} → ${newPlan?.name ?? ''}`,
+            severity: 'info',
+            planId,
+            planName: newPlan?.name,
+            beforeSnapshot: before,
+            afterSnapshot: after,
+            isKeyNode: true,
+            payload: { fromName: oldPlanName, toName: newPlan?.name ?? '' },
+          });
+
+          if (latestPlan) {
+            lastDeclinationRef.current = latestPlan.magneticDeclination;
+            lastThresholdRef.current = latestPlan.errorThreshold;
+          }
+        }, 10);
+      } else if (newPlan) {
+        lastDeclinationRef.current = newPlan.magneticDeclination;
+        lastThresholdRef.current = newPlan.errorThreshold;
+      }
+    },
+    [getCurrentSnapshot, history, activePlan, plans, setActivePlan, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes]
+  );
+
+  const handleCreatePlan = useCallback(
+    (name: string, description: string = '') => {
+      const before = getCurrentSnapshot();
+      const newPlan = createPlan(name, description);
+
+      if (!isApplyingSnapshotRef.current) {
+        const after = history.createSnapshot({
+          rotation,
+          magneticDeclination,
+          errorThreshold,
+          isDrawingMode,
+          axes,
+          activePlan: newPlan ?? activePlan,
+        });
+
+        history.recordOperation({
+          type: 'plan_create',
+          description: `创建方案「${name}」`,
+          severity: 'info',
+          planId: newPlan?.id,
+          planName: name,
+          beforeSnapshot: before,
+          afterSnapshot: after,
+          payload: { name, description },
+        });
+      }
+    },
+    [getCurrentSnapshot, history, createPlan, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes, activePlan]
+  );
+
+  const handleDeletePlan = useCallback(
+    (planId: string) => {
+      const plan = plans.find((p) => p.id === planId);
+      const before = getCurrentSnapshot();
+
+      deletePlan(planId);
+
+      if (!isApplyingSnapshotRef.current && plan) {
+        const after = history.createSnapshot({
+          rotation,
+          magneticDeclination,
+          errorThreshold,
+          isDrawingMode,
+          axes,
+          activePlan: planId === activePlanId
+            ? plans.find((p) => p.id !== planId) ?? null
+            : activePlan,
+        });
+
+        history.recordOperation({
+          type: 'plan_delete',
+          description: `删除方案「${plan.name}」`,
+          severity: 'warning',
+          planId,
+          planName: plan.name,
+          beforeSnapshot: before,
+          afterSnapshot: after,
+          payload: {
+            name: plan.name,
+            measurementCount: plan.measurements.length,
+          },
+        });
+      }
+    },
+    [getCurrentSnapshot, history, plans, deletePlan, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes, activePlan, activePlanId]
+  );
+
+  const handleUpdatePlan = useCallback(
+    (planId: string, updates: Partial<{ name: string; description: string; errorThreshold: number }>) => {
+      const plan = plans.find((p) => p.id === planId);
+      const before = getCurrentSnapshot();
+
+      updatePlan(planId, updates);
+
+      if (!isApplyingSnapshotRef.current && (updates.name || updates.description)) {
+        const after = history.createSnapshot({
+          rotation,
+          magneticDeclination,
+          errorThreshold: updates.errorThreshold ?? errorThreshold,
+          isDrawingMode,
+          axes,
+          activePlan: plan ?? null,
+        });
+
+        history.recordOperation({
+          type: 'plan_update',
+          description: `更新方案信息「${updates.name ?? plan?.name ?? ''}」`,
+          severity: 'info',
+          planId,
+          planName: updates.name ?? plan?.name,
+          beforeSnapshot: before,
+          afterSnapshot: after,
+          payload: updates,
+        });
+      }
+    },
+    [getCurrentSnapshot, history, plans, updatePlan, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes]
+  );
+
+  const handleRemoveMeasurement = useCallback(
+    (planId: string, recordId: string) => {
+      const plan = plans.find((p) => p.id === planId);
+      const record = plan?.measurements.find((m) => m.id === recordId);
+      const before = getCurrentSnapshot();
+
+      removeMeasurement(planId, recordId);
+
+      if (!isApplyingSnapshotRef.current && record) {
+        setTimeout(() => {
+          const updatedPlan = plans.find((p) => p.id === planId) || plan;
+          const after = history.createSnapshot({
+            rotation,
+            magneticDeclination,
+            errorThreshold,
+            isDrawingMode,
+            axes,
+            activePlan: updatedPlan ?? null,
+          });
+
+          history.recordOperation({
+            type: 'measurement_delete',
+            description: `删除测量记录「${record.axisLabel}」`,
+            severity: 'warning',
+            planId,
+            planName: plan?.name,
+            beforeSnapshot: before,
+            afterSnapshot: after,
+            payload: {
+              label: record.axisLabel,
+              bearing: record.correctedBearing,
+            },
+          });
+        }, 10);
+      }
+    },
+    [getCurrentSnapshot, history, plans, removeMeasurement, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes]
+  );
+
+  const handleClearMeasurements = useCallback(
+    (planId: string) => {
+      const plan = plans.find((p) => p.id === planId);
+      const count = plan?.measurements.length ?? 0;
+      const before = getCurrentSnapshot();
+
+      clearMeasurements(planId);
+
+      if (!isApplyingSnapshotRef.current && count > 0) {
+        setTimeout(() => {
+          const after = history.createSnapshot({
+            rotation,
+            magneticDeclination,
+            errorThreshold,
+            isDrawingMode,
+            axes,
+            activePlan: plan ? { ...plan, measurements: [] } : null,
+          });
+
+          history.recordOperation({
+            type: 'measurements_clear',
+            description: `清空方案内所有记录（${count}条）`,
+            severity: 'warning',
+            planId,
+            planName: plan?.name,
+            beforeSnapshot: before,
+            afterSnapshot: after,
+            payload: { count },
+          });
+        }, 10);
+      }
+    },
+    [getCurrentSnapshot, history, plans, clearMeasurements, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes]
+  );
+
+  const handleDuplicatePlan = useCallback(
+    (planId: string) => {
+      const before = getCurrentSnapshot();
+      const newPlan = duplicatePlan(planId);
+
+      if (!isApplyingSnapshotRef.current && newPlan) {
+        const after = history.createSnapshot({
+          rotation,
+          magneticDeclination,
+          errorThreshold,
+          isDrawingMode,
+          axes,
+          activePlan: newPlan ?? activePlan,
+        });
+
+        history.recordOperation({
+          type: 'plan_create',
+          description: `复制方案为「${newPlan.name}」`,
+          severity: 'info',
+          planId: newPlan.id,
+          planName: newPlan.name,
+          beforeSnapshot: before,
+          afterSnapshot: after,
+          payload: { name: newPlan.name, duplicatedFrom: planId },
+        });
+      }
+
+      return newPlan;
+    },
+    [getCurrentSnapshot, history, duplicatePlan, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes, activePlan]
+  );
 
   const handleBatchInput = useCallback(
     (items: { label: string; result: BearingResult }[]) => {
       if (!activePlanId) return;
+
+      const before = getCurrentSnapshot();
 
       let successCount = 0;
       let duplicateCount = 0;
@@ -310,6 +911,37 @@ function App() {
         }
       });
 
+      if (!isApplyingSnapshotRef.current && successCount > 0) {
+        setTimeout(() => {
+          const updatedPlan = plans.find((p) => p.id === activePlanId) || activePlan;
+          const after = history.createSnapshot({
+            rotation,
+            magneticDeclination,
+            errorThreshold,
+            isDrawingMode,
+            axes,
+            activePlan: updatedPlan ?? null,
+          });
+
+          history.recordOperation({
+            type: 'batch_input',
+            description: `批量录入 ${successCount} 条记录`,
+            severity: exceedCount > 0 ? 'warning' : 'info',
+            planId: activePlanId,
+            planName: activePlan?.name,
+            beforeSnapshot: before,
+            afterSnapshot: after,
+            isKeyNode: true,
+            payload: {
+              success: successCount,
+              duplicate: duplicateCount,
+              exceed: exceedCount,
+              total: items.length,
+            },
+          });
+        }, 10);
+      }
+
       let title: string;
       let message: string;
       let color: string;
@@ -341,7 +973,19 @@ function App() {
 
       notifications.show({ title, message, color, icon });
     },
-    [activePlanId, addMeasurement]
+    [
+      activePlanId,
+      addMeasurement,
+      activePlan,
+      plans,
+      history,
+      getCurrentSnapshot,
+      rotation,
+      magneticDeclination,
+      errorThreshold,
+      isDrawingMode,
+      axes,
+    ]
   );
 
   useEffect(() => {
@@ -357,6 +1001,13 @@ function App() {
       );
     }
   }, [activePlan?.id]);
+
+  useEffect(() => {
+    if (activePlan) {
+      lastDeclinationRef.current = activePlan.magneticDeclination;
+      lastThresholdRef.current = activePlan.errorThreshold;
+    }
+  }, [activePlan?.magneticDeclination, activePlan?.errorThreshold]);
 
   const headerTitle = (
     <Group gap="sm">
@@ -391,6 +1042,28 @@ function App() {
           <Group h="100%" justify="space-between">
             {headerTitle}
             <Group>
+              <Tooltip label="历史回放与过程审计" withArrow>
+                <Button
+                  variant={historyDrawerOpen ? 'filled' : 'light'}
+                  color="grape"
+                  size="md"
+                  leftSection={<IconHistory size={18} />}
+                  onClick={openHistoryDrawer}
+                >
+                  历史审计
+                  {history.statistics.anomalies > 0 && (
+                    <Badge
+                      color="red"
+                      size="xs"
+                      variant="filled"
+                      circle
+                      ml={4}
+                    >
+                      {history.statistics.anomalies}
+                    </Badge>
+                  )}
+                </Button>
+              </Tooltip>
               <Tooltip label="批量录入轴线数据" withArrow>
                 <Button
                   variant="light"
@@ -522,7 +1195,7 @@ function App() {
                   errorThreshold={errorThreshold}
                   onErrorThresholdChange={handleErrorThresholdChange}
                   isDrawingMode={isDrawingMode}
-                  onDrawingModeChange={setIsDrawingMode}
+                  onDrawingModeChange={handleDrawingModeToggle}
                   bearingResult={bearingResult}
                   previewAngle={previewAngle}
                 />
@@ -533,15 +1206,13 @@ function App() {
               <SurveyPlanManager
                 plans={plans}
                 activePlanId={activePlanId}
-                onSetActive={setActivePlan}
-                onCreate={createPlan}
-                onDelete={deletePlan}
-                onUpdate={updatePlan}
-                onRemoveMeasurement={(planId, recordId) =>
-                  removeMeasurement(planId, recordId)
-                }
-                onClearMeasurements={clearMeasurements}
-                onDuplicate={duplicatePlan}
+                onSetActive={handleSetActivePlan}
+                onCreate={handleCreatePlan}
+                onDelete={handleDeletePlan}
+                onUpdate={handleUpdatePlan}
+                onRemoveMeasurement={handleRemoveMeasurement}
+                onClearMeasurements={handleClearMeasurements}
+                onDuplicate={handleDuplicatePlan}
               />
             </div>
 
@@ -679,6 +1350,8 @@ function App() {
               3. <b>绘制轴线</b>：开启「绘制建筑轴线模式」后，在罗盘上拖动绘制一条直线
               <br />
               4. <b>保存测量</b>：轴线绘制完成后会弹出保存对话框，填写标签后保存
+              <br />
+              5. <b>历史审计</b>：点击顶部「历史审计」按钮，可回放所有操作、对比关键节点、标记异常操作
             </Text>
           </Paper>
 
@@ -698,6 +1371,25 @@ function App() {
               <br />• <b>唯一性</b>：同一方案不能存在相同轴线+相同方位的重复记录
               <br />• <b>磁偏角联动</b>：修改磁偏角后，所有历史测量结果会立即自动更新
               <br />• <b>误差标识</b>：误差超过阈值时，记录会以红色醒目标识
+            </Text>
+          </Paper>
+
+          <Paper p="sm" radius="md" withBorder bg="grape.0">
+            <Group mb="xs">
+              <ThemeIcon size="sm" color="grape" radius="md">
+                <IconHistory size={14} />
+              </ThemeIcon>
+              <Text fw={600} size="sm">
+                历史审计功能
+              </Text>
+            </Group>
+            <Text size="sm" lh={1.8}>
+              • <b>操作记录</b>：系统自动记录所有操作（旋转、调整、绘制、保存等）
+              <br />• <b>逐步回放</b>：可逐步回放操作流程，支持播放/暂停/调速
+              <br />• <b>关键节点比对</b>：选择任意两条记录进行横向对比
+              <br />• <b>异常标记</b>：自动识别误差超标、大幅跳变、误删除等异常操作
+              <br />• <b>状态恢复</b>：点击历史记录可快速恢复到该时刻的系统状态
+              <br />• <b>多维度筛选</b>：按操作类型、严重程度、方案、关键词筛选记录
             </Text>
           </Paper>
 
@@ -739,6 +1431,51 @@ function App() {
         onClose={closeAnalysisReport}
         plan={activePlan}
       />
+
+      <Drawer
+        opened={historyDrawerOpen}
+        onClose={closeHistoryDrawer}
+        title={
+          <Group>
+            <ThemeIcon size="md" radius="md" color="grape" variant="filled">
+              <IconHistory size={18} />
+            </ThemeIcon>
+            <Stack gap={0}>
+              <Text fw={600}>历史测线回放与过程审计</Text>
+              <Text size="xs" c="dimmed">
+                记录 {history.statistics.total} 条 · 异常 {history.statistics.anomalies} 条
+              </Text>
+            </Stack>
+          </Group>
+        }
+        position="right"
+        size={640}
+        padding="lg"
+        scrollAreaComponent={ScrollArea.Autosize}
+      >
+        <HistoryPlaybackPanel
+          records={history.records}
+          filteredRecords={history.filteredRecords}
+          playback={history.playback}
+          filter={history.filter}
+          statistics={history.statistics}
+          plans={plans}
+          activePlan={activePlan}
+          onSetFilter={history.setFilter}
+          onStepForward={history.stepForward}
+          onStepBackward={history.stepBackward}
+          onJumpToRecord={history.jumpToRecord}
+          onJumpToFirst={history.jumpToFirst}
+          onJumpToLast={history.jumpToLast}
+          onTogglePlayback={history.togglePlayback}
+          onGetRecordAtPlayback={history.getRecordAtPlayback}
+          onSetPlayback={history.setPlayback}
+          onClearHistory={history.clearHistory}
+          onDeleteRecord={history.deleteRecord}
+          onExportHistory={history.exportHistory}
+          onApplySnapshot={applySnapshot}
+        />
+      </Drawer>
     </AppShell>
   );
 }

@@ -103,3 +103,69 @@ export interface AnalysisReportData {
   summary: string;
   recommendations: string[];
 }
+
+export type OperationType =
+  | 'rotation_change'
+  | 'declination_change'
+  | 'threshold_change'
+  | 'axis_draw'
+  | 'axis_save'
+  | 'axis_cancel'
+  | 'plan_switch'
+  | 'plan_create'
+  | 'plan_delete'
+  | 'plan_update'
+  | 'measurement_delete'
+  | 'measurements_clear'
+  | 'compass_reset'
+  | 'axes_clear'
+  | 'batch_input'
+  | 'drawing_mode_toggle';
+
+export type OperationSeverity = 'info' | 'warning' | 'error' | 'critical';
+
+export interface OperationSnapshot {
+  rotation: number;
+  magneticDeclination: number;
+  errorThreshold: number;
+  isDrawingMode: boolean;
+  axes: AxisLine[];
+  activePlanId: string | null;
+  measurements: MeasurementRecord[];
+}
+
+export interface OperationRecord {
+  id: string;
+  timestamp: number;
+  type: OperationType;
+  planId: string | null;
+  planName: string | null;
+  description: string;
+  severity: OperationSeverity;
+  isKeyNode: boolean;
+  anomalyType?: string;
+  anomalyReason?: string;
+  payload?: Record<string, unknown>;
+  beforeSnapshot: OperationSnapshot;
+  afterSnapshot: OperationSnapshot;
+}
+
+export interface HistoryFilter {
+  planId?: string | null;
+  types?: OperationType[];
+  severities?: OperationSeverity[];
+  startTime?: number;
+  endTime?: number;
+  onlyKeyNodes?: boolean;
+  onlyAnomalies?: boolean;
+  keyword?: string;
+}
+
+export interface PlaybackState {
+  isPlaying: boolean;
+  currentIndex: number;
+  speed: number;
+  loop: boolean;
+  showDiff: boolean;
+  highlightedRecordId: string | null;
+}
