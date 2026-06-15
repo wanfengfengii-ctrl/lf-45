@@ -27,12 +27,20 @@ import {
   IconRulerMeasure,
   IconInfoCircle,
   IconRotate,
+  IconListDetails,
+  IconFileText,
+  IconChartBar,
+  IconReport,
+  IconUpload,
 } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 
 import { CompassDial } from '@/components/CompassDial';
 import { ControlPanel } from '@/components/ControlPanel';
 import { SurveyPlanManager } from '@/components/SurveyPlanManager';
+import { BatchInputModal } from '@/components/BatchInputModal';
+import { StatisticsPanel } from '@/components/StatisticsPanel';
+import { AnalysisReportModal } from '@/components/AnalysisReportModal';
 import { useSurveyPlans } from '@/hooks/useSurveyPlans';
 import type { AxisLine, BearingResult } from '@/types';
 import {
@@ -69,6 +77,8 @@ function App() {
   const [pendingAxis, setPendingAxis] = useState<AxisLine | null>(null);
   const [axisLabel, setAxisLabel] = useState('');
   const [showHelp, { open: openHelp, close: closeHelp }] = useDisclosure(false);
+  const [batchInputModalOpen, { open: openBatchInput, close: closeBatchInput }] = useDisclosure(false);
+  const [analysisReportModalOpen, { open: openAnalysisReport, close: closeAnalysisReport }] = useDisclosure(false);
 
   const magneticDeclination = activePlan?.magneticDeclination ?? 0;
   const errorThreshold = activePlan?.errorThreshold ?? DEFAULT_ERROR_THRESHOLD;
@@ -259,6 +269,52 @@ function App() {
     });
   }, []);
 
+  const handleBatchInput = useCallback(
+    (items: { label: string; result: BearingResult }[]) => {
+      if (!activePlanId) return;
+
+      let successCount = 0;
+      let duplicateCount = 0;
+      let exceedCount = 0;
+
+      items.forEach((item) => {
+        const { success, duplicate } = addMeasurement(activePlanId, {
+          axisId: `batch-${generateId()}`,
+          axisLabel: item.label,
+          compassReading: item.result.compassReading,
+          trueBearing: item.result.trueBearing,
+          correctedBearing: item.result.correctedBearing,
+          mountainName: item.result.mountain.name,
+          mountainElement: item.result.mountain.element,
+          errorRange: item.result.errorRange,
+          errorAmount: item.result.errorAmount,
+          exceedsThreshold: item.result.exceedsThreshold,
+        });
+
+        if (success) {
+          successCount++;
+          if (item.result.exceedsThreshold) exceedCount++;
+        }
+        if (duplicate) {
+          duplicateCount++;
+        }
+      });
+
+      const messageParts: string[] = [];
+      if (successCount > 0) messageParts.push(`成功录入 ${successCount} 条`);
+      if (duplicateCount > 0) messageParts.push(`${duplicateCount} 条重复被跳过`);
+      if (exceedCount > 0) messageParts.push(`${exceedCount} 条超标`);
+
+      notifications.show({
+        title: '批量录入完成',
+        message: messageParts.join('，'),
+        color: successCount > 0 ? 'green' : 'yellow',
+        icon: successCount > 0 ? <IconCheck size={18} /> : <IconAlertCircle size={18} />,
+      });
+    },
+    [activePlanId, addMeasurement]
+  );
+
   useEffect(() => {
     if (activePlan) {
       const measuredIds = new Set(activePlan.measurements.map((m) => m.axisId));
@@ -306,6 +362,29 @@ function App() {
           <Group h="100%" justify="space-between">
             {headerTitle}
             <Group>
+              <Tooltip label="批量录入轴线数据" withArrow>
+                <Button
+                  variant="light"
+                  color="violet"
+                  size="md"
+                  leftSection={<IconUpload size={18} />}
+                  onClick={openBatchInput}
+                >
+                  批量录入
+                </Button>
+              </Tooltip>
+              <Tooltip label="生成分析报告" withArrow>
+                <Button
+                  variant="light"
+                  color="indigo"
+                  size="md"
+                  leftSection={<IconReport size={18} />}
+                  onClick={openAnalysisReport}
+                  disabled={!activePlan || activePlan.measurements.length === 0}
+                >
+                  分析报告
+                </Button>
+              </Tooltip>
               <Tooltip label="使用帮助" withArrow>
                 <Button
                   variant="subtle"
@@ -421,7 +500,7 @@ function App() {
               </Stack>
             </div>
 
-            <div style={{ gridColumn: 'span 2' }}>
+            <div style={{ gridColumn: 'span 1' }}>
               <SurveyPlanManager
                 plans={plans}
                 activePlanId={activePlanId}
@@ -435,6 +514,10 @@ function App() {
                 onClearMeasurements={clearMeasurements}
                 onDuplicate={duplicatePlan}
               />
+            </div>
+
+            <div style={{ gridColumn: 'span 1' }}>
+              <StatisticsPanel plan={activePlan} />
             </div>
           </SimpleGrid>
         </Container>
@@ -609,6 +692,21 @@ function App() {
           </Group>
         </Stack>
       </Modal>
+
+      <BatchInputModal
+        opened={batchInputModalOpen}
+        onClose={closeBatchInput}
+        rotation={rotation}
+        magneticDeclination={magneticDeclination}
+        errorThreshold={errorThreshold}
+        onSubmit={handleBatchInput}
+      />
+
+      <AnalysisReportModal
+        opened={analysisReportModalOpen}
+        onClose={closeAnalysisReport}
+        plan={activePlan}
+      />
     </AppShell>
   );
 }

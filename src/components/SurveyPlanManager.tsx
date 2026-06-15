@@ -42,11 +42,13 @@ import {
   IconStack2,
 } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
-import type { SurveyPlan, MeasurementRecord } from '@/types';
+import type { SurveyPlan, MeasurementRecord, PlanStatistics } from '@/types';
 import {
   formatAngle,
   formatTimestamp,
   ELEMENT_COLORS,
+  calculatePlanStatistics,
+  findDuplicateMeasurements,
 } from '@/utils/compass';
 
 interface SurveyPlanManagerProps {
@@ -193,6 +195,10 @@ export const SurveyPlanManager: React.FC<SurveyPlanManagerProps> = ({
 
   const errorCount = (plan: SurveyPlan) =>
     plan.measurements.filter((m) => m.exceedsThreshold).length;
+
+  const getPlanStats = (plan: SurveyPlan): PlanStatistics => {
+    return calculatePlanStatistics(plan.measurements, plan.errorThreshold);
+  };
 
   const renderMeasurementsTable = (measurements: MeasurementRecord[]) => {
     if (measurements.length === 0) {
@@ -589,15 +595,15 @@ export const SurveyPlanManager: React.FC<SurveyPlanManagerProps> = ({
       <Modal
         opened={compareModalOpen}
         onClose={closeCompare}
-        title="多方案对比"
+        title="多方案横向对比"
         size="xl"
         centered
       >
-        <ScrollArea h={500} type="auto">
+        <ScrollArea h={520} type="auto">
           <Table striped withTableBorder withColumnBorders className="text-sm">
             <thead>
               <tr>
-                <th>指标</th>
+                <th style={{ width: 120 }}>对比指标</th>
                 {plans.map((p) => (
                   <th key={p.id} style={{ minWidth: 140 }}>
                     <Badge
@@ -624,17 +630,17 @@ export const SurveyPlanManager: React.FC<SurveyPlanManagerProps> = ({
                 ))}
               </tr>
               <tr>
-                <td><Text fw={500}>测量数量</Text></td>
+                <td><Text fw={500}>📊 测量总数</Text></td>
                 {plans.map((p) => (
                   <td key={p.id}>
-                    <Badge size="sm" variant="light">
+                    <Badge size="sm" variant="light" color="blue">
                       {p.measurements.length} 条
                     </Badge>
                   </td>
                 ))}
               </tr>
               <tr>
-                <td><Text fw={500}>合格数</Text></td>
+                <td><Text fw={500}>✅ 合格数</Text></td>
                 {plans.map((p) => (
                   <td key={p.id}>
                     <Text c="green" fw={600}>
@@ -644,7 +650,7 @@ export const SurveyPlanManager: React.FC<SurveyPlanManagerProps> = ({
                 ))}
               </tr>
               <tr>
-                <td><Text fw={500}>超标数</Text></td>
+                <td><Text fw={500}>⚠️ 超标数</Text></td>
                 {plans.map((p) => (
                   <td key={p.id}>
                     <Text
@@ -657,50 +663,56 @@ export const SurveyPlanManager: React.FC<SurveyPlanManagerProps> = ({
                 ))}
               </tr>
               <tr>
-                <td><Text fw={500}>合格率</Text></td>
-                {plans.map((p) => (
-                  <td key={p.id}>
-                    {p.measurements.length > 0 ? (
-                      <Badge
-                        color={
-                          ((p.measurements.length - errorCount(p)) /
-                            p.measurements.length) *
-                            100 >=
-                          80
-                            ? 'green'
-                            : 'orange'
-                        }
-                        variant="filled"
-                        size="sm"
-                      >
-                        {(
-                          ((p.measurements.length - errorCount(p)) /
-                            p.measurements.length) *
-                          100
-                        ).toFixed(1)}
-                        %
-                      </Badge>
-                    ) : (
-                      <Text c="dimmed" size="xs">
-                        —
-                      </Text>
-                    )}
-                  </td>
-                ))}
-              </tr>
-              <tr>
-                <td><Text fw={500}>平均误差</Text></td>
+                <td><Text fw={500}>📈 合格率</Text></td>
                 {plans.map((p) => {
-                  const avg =
-                    p.measurements.length > 0
-                      ? p.measurements.reduce((s, m) => s + m.errorAmount, 0) /
-                        p.measurements.length
-                      : 0;
+                  const stats = getPlanStats(p);
                   return (
                     <td key={p.id}>
-                      {p.measurements.length > 0 ? (
-                        <Text fw={600} c={avg > p.errorThreshold ? 'red' : 'green'}>
-                          {avg.toFixed(2)}°
+                      {stats.totalCount > 0 ? (
+                        <Badge
+                          color={stats.passRate >= 80 ? 'green' : stats.passRate >= 60 ? 'yellow' : 'red'}
+                          variant="filled"
+                          size="sm"
+                        >
+                          {stats.passRate.toFixed(1)}%
+                        </Badge>
+                      ) : (
+                        <Text c="dimmed" size="xs">
+                          —
+                        </Text>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+              <tr>
+                <td><Text fw={500}>📋 重复记录</Text></td>
+                {plans.map((p) => {
+                  const stats = getPlanStats(p);
+                  return (
+                    <td key={p.id}>
+                      {stats.duplicateCount > 0 ? (
+                        <Badge size="sm" color="yellow" variant="filled">
+                          {stats.duplicateCount} 条
+                        </Badge>
+                      ) : (
+                        <Text c="green" size="sm" fw={500}>
+                          无重复
+                        </Text>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+              <tr>
+                <td><Text fw={500}>🎯 平均误差</Text></td>
+                {plans.map((p) => {
+                  const stats = getPlanStats(p);
+                  return (
+                    <td key={p.id}>
+                      {stats.totalCount > 0 ? (
+                        <Text fw={600} c={stats.averageError > p.errorThreshold ? 'red' : 'green'}>
+                          {stats.averageError.toFixed(2)}°
                         </Text>
                       ) : (
                         <Text c="dimmed" size="xs">
@@ -712,7 +724,93 @@ export const SurveyPlanManager: React.FC<SurveyPlanManagerProps> = ({
                 })}
               </tr>
               <tr>
-                <td><Text fw={500}>创建时间</Text></td>
+                <td><Text fw={500}>📉 最小误差</Text></td>
+                {plans.map((p) => {
+                  const stats = getPlanStats(p);
+                  return (
+                    <td key={p.id}>
+                      {stats.totalCount > 0 ? (
+                        <Text fw={600} c="green">
+                          {stats.minError.toFixed(2)}°
+                        </Text>
+                      ) : (
+                        <Text c="dimmed" size="xs">
+                          —
+                        </Text>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+              <tr>
+                <td><Text fw={500}>📈 最大误差</Text></td>
+                {plans.map((p) => {
+                  const stats = getPlanStats(p);
+                  return (
+                    <td key={p.id}>
+                      {stats.totalCount > 0 ? (
+                        <Text fw={600} c="red">
+                          {stats.maxError.toFixed(2)}°
+                        </Text>
+                      ) : (
+                        <Text c="dimmed" size="xs">
+                          —
+                        </Text>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+              <tr>
+                <td><Text fw={500}>⛰️ 山向种类</Text></td>
+                {plans.map((p) => {
+                  const stats = getPlanStats(p);
+                  return (
+                    <td key={p.id}>
+                      {stats.totalCount > 0 ? (
+                        <Badge size="sm" variant="light" color="violet">
+                          {stats.mountainDistribution.length} 种
+                        </Badge>
+                      ) : (
+                        <Text c="dimmed" size="xs">
+                          —
+                        </Text>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+              <tr>
+                <td><Text fw={500}>🏆 主导山向</Text></td>
+                {plans.map((p) => {
+                  const stats = getPlanStats(p);
+                  const top = stats.mountainDistribution[0];
+                  return (
+                    <td key={p.id}>
+                      {top ? (
+                        <Group gap={4}>
+                          <Badge
+                            size="sm"
+                            variant="filled"
+                            style={{ backgroundColor: ELEMENT_COLORS[top.element] }}
+                          >
+                            {top.name}山
+                          </Badge>
+                          <Text size="xs" c="dimmed">
+                            {top.percentage.toFixed(0)}%
+                          </Text>
+                        </Group>
+                      ) : (
+                        <Text c="dimmed" size="xs">
+                          —
+                        </Text>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+              <tr>
+                <td><Text fw={500}>📅 创建时间</Text></td>
                 {plans.map((p) => (
                   <td key={p.id}>
                     <Text size="xs" c="dimmed">
@@ -725,48 +823,62 @@ export const SurveyPlanManager: React.FC<SurveyPlanManagerProps> = ({
           </Table>
         </ScrollArea>
         <Divider my="md" />
-        <Text size="sm" fw={500} mb="sm">
-          各方案山向分布统计
-        </Text>
-        <SimpleGrid cols={plans.length} spacing="sm">
-          {plans.map((plan) => {
-            const mountainCounts: Record<string, number> = {};
-            plan.measurements.forEach((m) => {
-              mountainCounts[m.mountainName] = (mountainCounts[m.mountainName] || 0) + 1;
-            });
-            return (
-              <Card key={plan.id} p="sm" radius="md" withBorder>
-                <Text fw={600} size="sm" mb="xs">
-                  {plan.name}
-                </Text>
-                {Object.keys(mountainCounts).length > 0 ? (
-                  <List size="xs" spacing={4}>
-                    {Object.entries(mountainCounts)
-                      .sort((a, b) => b[1] - a[1])
-                      .map(([m, c]) => (
-                        <List.Item key={m}>
-                          <Group gap={4}>
+        <Group justify="space-between" mb="sm">
+          <Text size="sm" fw={500}>
+            各方案山向分布统计
+          </Text>
+          <Badge size="sm" variant="light">
+            共 {plans.length} 个方案
+          </Badge>
+        </Group>
+        <ScrollArea h={180} type="auto">
+          <SimpleGrid cols={Math.min(plans.length, 4)} spacing="sm">
+            {plans.map((plan) => {
+              const stats = getPlanStats(plan);
+              return (
+                <Card key={plan.id} p="sm" radius="md" withBorder bg="gray.0">
+                  <Group justify="space-between" mb="xs">
+                    <Text fw={600} size="sm" lineClamp={1}>
+                      {plan.name}
+                    </Text>
+                    <Badge size="xs" variant="light">
+                      {stats.totalCount} 条
+                    </Badge>
+                  </Group>
+                  {stats.mountainDistribution.length > 0 ? (
+                    <Stack gap={4}>
+                      {stats.mountainDistribution.slice(0, 5).map((m) => (
+                        <div key={m.name}>
+                          <Group justify="space-between" mb={2}>
                             <Badge
                               size="xs"
                               variant="filled"
-                              color="violet"
+                              style={{ backgroundColor: ELEMENT_COLORS[m.element] }}
                             >
-                              {m}山
+                              {m.name}山
                             </Badge>
-                            <Text c="dimmed">× {c}</Text>
+                            <Text size="xs" fw={500}>
+                              {m.count} ({m.percentage.toFixed(0)}%)
+                            </Text>
                           </Group>
-                        </List.Item>
+                        </div>
                       ))}
-                  </List>
-                ) : (
-                  <Text size="xs" c="dimmed">
-                    无数据
-                  </Text>
-                )}
-              </Card>
-            );
-          })}
-        </SimpleGrid>
+                      {stats.mountainDistribution.length > 5 && (
+                        <Text size="xs" c="dimmed" ta="center">
+                          ... 还有 {stats.mountainDistribution.length - 5} 种
+                        </Text>
+                      )}
+                    </Stack>
+                  ) : (
+                    <Text size="xs" c="dimmed" ta="center" py="sm">
+                      暂无数据
+                    </Text>
+                  )}
+                </Card>
+              );
+            })}
+          </SimpleGrid>
+        </ScrollArea>
       </Modal>
     </Stack>
   );

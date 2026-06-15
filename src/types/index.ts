@@ -65,3 +65,41 @@ export interface BearingResult {
   errorAmount: number;
   exceedsThreshold: boolean;
 }
+
+export interface BatchInputItem {
+  label: string;
+  compassReading: number;
+}
+
+export interface MountainDistribution {
+  name: string;
+  element: string;
+  count: number;
+  percentage: number;
+}
+
+export interface PlanStatistics {
+  totalCount: number;
+  passCount: number;
+  failCount: number;
+  passRate: number;
+  duplicateCount: number;
+  averageError: number;
+  maxError: number;
+  minError: number;
+  mountainDistribution: MountainDistribution[];
+  highRiskRecords: MeasurementRecord[];
+}
+
+export interface AnalysisReportData {
+  planId: string;
+  planName: string;
+  planDescription: string;
+  generatedAt: number;
+  magneticDeclination: number;
+  errorThreshold: number;
+  statistics: PlanStatistics;
+  measurements: MeasurementRecord[];
+  summary: string;
+  recommendations: string[];
+}
