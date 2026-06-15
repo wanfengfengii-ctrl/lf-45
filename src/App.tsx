@@ -276,8 +276,17 @@ function App() {
       let successCount = 0;
       let duplicateCount = 0;
       let exceedCount = 0;
+      const seen = new Set<string>();
 
       items.forEach((item) => {
+        const key = `${item.label}-${item.result.correctedBearing.toFixed(2)}`;
+
+        if (seen.has(key)) {
+          duplicateCount++;
+          return;
+        }
+        seen.add(key);
+
         const { success, duplicate } = addMeasurement(activePlanId, {
           axisId: `batch-${generateId()}`,
           axisLabel: item.label,
@@ -297,20 +306,40 @@ function App() {
         }
         if (duplicate) {
           duplicateCount++;
+          seen.delete(key);
         }
       });
 
-      const messageParts: string[] = [];
-      if (successCount > 0) messageParts.push(`成功录入 ${successCount} 条`);
-      if (duplicateCount > 0) messageParts.push(`${duplicateCount} 条重复被跳过`);
-      if (exceedCount > 0) messageParts.push(`${exceedCount} 条超标`);
+      let title: string;
+      let message: string;
+      let color: string;
+      let icon: React.ReactNode;
 
-      notifications.show({
-        title: '批量录入完成',
-        message: messageParts.join('，'),
-        color: successCount > 0 ? 'green' : 'yellow',
-        icon: successCount > 0 ? <IconCheck size={18} /> : <IconAlertCircle size={18} />,
-      });
+      if (successCount === items.length && duplicateCount === 0) {
+        title = '批量录入成功';
+        message = `全部 ${successCount} 条记录录入成功`;
+        if (exceedCount > 0) {
+          message += `，其中 ${exceedCount} 条超标`;
+        }
+        color = 'green';
+        icon = <IconCheck size={18} />;
+      } else if (successCount > 0) {
+        title = '批量录入完成';
+        const parts: string[] = [];
+        parts.push(`成功录入 ${successCount} 条`);
+        if (duplicateCount > 0) parts.push(`${duplicateCount} 条重复被跳过`);
+        if (exceedCount > 0) parts.push(`${exceedCount} 条超标`);
+        message = parts.join('，');
+        color = 'blue';
+        icon = <IconCheck size={18} />;
+      } else {
+        title = '批量录入失败';
+        message = `${duplicateCount} 条全部为重复记录，已跳过`;
+        color = 'yellow';
+        icon = <IconAlertCircle size={18} />;
+      }
+
+      notifications.show({ title, message, color, icon });
     },
     [activePlanId, addMeasurement]
   );
@@ -327,7 +356,7 @@ function App() {
         })
       );
     }
-  }, [activePlan]);
+  }, [activePlan?.id]);
 
   const headerTitle = (
     <Group gap="sm">
@@ -517,7 +546,10 @@ function App() {
             </div>
 
             <div style={{ gridColumn: 'span 1' }}>
-              <StatisticsPanel plan={activePlan} />
+              <StatisticsPanel 
+                key={`${activePlan?.id}-${activePlan?.updatedAt}`} 
+                plan={activePlan} 
+              />
             </div>
           </SimpleGrid>
         </Container>

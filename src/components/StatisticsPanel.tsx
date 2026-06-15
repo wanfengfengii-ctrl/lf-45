@@ -42,7 +42,7 @@ export const StatisticsPanel: React.FC<StatisticsPanelProps> = ({ plan }) => {
   const statistics = useMemo<PlanStatistics | null>(() => {
     if (!plan) return null;
     return calculatePlanStatistics(plan.measurements, plan.errorThreshold);
-  }, [plan]);
+  }, [plan?.id, plan?.measurements, plan?.errorThreshold, plan?.magneticDeclination]);
 
   if (!plan || !statistics) {
     return (

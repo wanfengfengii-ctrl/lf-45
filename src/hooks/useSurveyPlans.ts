@@ -161,14 +161,25 @@ export function useSurveyPlans() {
   }, []);
 
   const isDuplicateMeasurement = useCallback(
-    (planId: string, axisId: string, correctedBearing: number, tolerance: number = 0.5): boolean => {
+    (
+      planId: string,
+      axisId: string,
+      axisLabel: string,
+      correctedBearing: number,
+      tolerance: number = 0.5
+    ): boolean => {
       const plan = plans.find((p) => p.id === planId);
       if (!plan) return false;
 
       return plan.measurements.some((m) => {
-        if (m.axisId !== axisId) return false;
-        const diff = Math.abs(normalizeAngle(m.correctedBearing) - normalizeAngle(correctedBearing));
-        return diff <= tolerance || Math.abs(diff - 360) <= tolerance;
+        const angleDiff = Math.abs(normalizeAngle(m.correctedBearing) - normalizeAngle(correctedBearing));
+        const angleMatch = angleDiff <= tolerance || Math.abs(angleDiff - 360) <= tolerance;
+
+        if (m.axisId === axisId) {
+          return angleMatch;
+        }
+
+        return m.axisLabel === axisLabel && angleMatch;
       });
     },
     [plans]
@@ -179,7 +190,12 @@ export function useSurveyPlans() {
       const plan = plans.find((p) => p.id === planId);
       if (!plan) return { success: false, duplicate: false };
 
-      const duplicate = isDuplicateMeasurement(planId, record.axisId, record.correctedBearing);
+      const duplicate = isDuplicateMeasurement(
+        planId,
+        record.axisId,
+        record.axisLabel,
+        record.correctedBearing
+      );
       if (duplicate) {
         return { success: false, duplicate: true };
       }
