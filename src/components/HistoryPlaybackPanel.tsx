@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
 import {
   Paper,
   Group,
@@ -16,15 +16,11 @@ import {
   Chip,
   TextInput,
   Select,
-  Switch,
   Table,
   Menu,
   Indicator,
   Modal,
   Slider,
-  Timeline,
-  Avatar,
-  Box,
   Progress,
 } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
@@ -36,7 +32,6 @@ import {
   IconPlayerSkipForward,
   IconPlayerTrackNext,
   IconPlayerTrackPrev,
-  IconArrowLoopRight,
   IconArrowsDiff,
   IconFilter,
   IconSearch,
@@ -55,10 +50,7 @@ import {
   IconCheck,
   IconX,
   IconRepeat,
-  IconChevronDown,
   IconDots,
-  IconEye,
-  IconEyeOff,
   IconListDetails,
   IconRuler,
   IconPencil,
@@ -109,7 +101,6 @@ interface HistoryPlaybackPanelProps {
     byPlan: Record<string, { name: string; count: number }>;
   };
   plans: SurveyPlan[];
-  activePlan: SurveyPlan | null;
   onSetFilter: (filter: Partial<HistoryFilter>) => void;
   onStepForward: () => void;
   onStepBackward: () => void;
@@ -123,7 +114,7 @@ interface HistoryPlaybackPanelProps {
   onDeleteRecord: (recordId: string) => void;
   onExportHistory: () => void;
   onSelectRecord?: (record: OperationRecord) => void;
-  onApplySnapshot?: (snapshot: OperationSnapshot) => void;
+  onApplySnapshot?: (snapshot: OperationSnapshot, silent?: boolean) => void;
 }
 
 const OPERATION_ICONS: Record<OperationType, React.ReactNode> = {
@@ -152,7 +143,6 @@ export const HistoryPlaybackPanel: React.FC<HistoryPlaybackPanelProps> = ({
   filter,
   statistics,
   plans,
-  activePlan,
   onSetFilter,
   onStepForward,
   onStepBackward,
@@ -174,10 +164,25 @@ export const HistoryPlaybackPanel: React.FC<HistoryPlaybackPanelProps> = ({
   const [detailRecord, setDetailRecord] = useState<OperationRecord | null>(null);
   const [showFilters, setShowFilters] = useState(false);
 
+  const applySnapshotRef = useRef(onApplySnapshot);
+  applySnapshotRef.current = onApplySnapshot;
+
+  const getRecordRef = useRef(onGetRecordAtPlayback);
+  getRecordRef.current = onGetRecordAtPlayback;
+
   const currentRecord = onGetRecordAtPlayback();
   const playbackProgress = filteredRecords.length > 0
     ? ((playback.currentIndex + 1) / filteredRecords.length) * 100
     : 0;
+
+  useEffect(() => {
+    if (playback.currentIndex >= 0) {
+      const record = getRecordRef.current();
+      if (record && applySnapshotRef.current) {
+        applySnapshotRef.current(record.afterSnapshot, true);
+      }
+    }
+  }, [playback.currentIndex]);
 
   const operationTypeOptions = useMemo(() => {
     return Object.entries(OPERATION_TYPE_LABELS).map(([value, label]) => ({

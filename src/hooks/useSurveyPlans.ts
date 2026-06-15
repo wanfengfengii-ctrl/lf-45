@@ -3,7 +3,6 @@ import type { SurveyPlan, MeasurementRecord } from '@/types';
 import {
   generateId,
   normalizeAngle,
-  calculateBearingResult,
   getMountainByAngle,
   angleDifference,
 } from '@/utils/compass';
@@ -275,6 +274,59 @@ export function useSurveyPlans() {
     return newPlan;
   }, [plans]);
 
+  const restorePlanFromSnapshot = useCallback(
+    (planId: string, snapshot: { magneticDeclination: number; errorThreshold: number; measurements: MeasurementRecord[] }) => {
+      setPlans((prev) =>
+        prev.map((p) => {
+          if (p.id !== planId) return p;
+
+          const needsRecalc =
+            snapshot.magneticDeclination !== p.magneticDeclination ||
+            snapshot.errorThreshold !== p.errorThreshold;
+
+          let measurements = snapshot.measurements;
+
+          if (needsRecalc) {
+            const delta = snapshot.magneticDeclination - p.magneticDeclination;
+            measurements = snapshot.measurements.map((m) => {
+              if (delta !== 0) {
+                const newCorrected = normalizeAngle(m.correctedBearing + delta);
+                const mountain = getMountainByAngle(newCorrected);
+                const errorAmount = angleDifference(newCorrected, mountain.midAngle);
+                const exceedsThreshold = errorAmount > snapshot.errorThreshold || errorAmount > 7.5;
+                const errorRange: [number, number] = [
+                  normalizeAngle(newCorrected - errorAmount),
+                  normalizeAngle(newCorrected + errorAmount),
+                ];
+                return {
+                  ...m,
+                  correctedBearing: newCorrected,
+                  mountainName: mountain.name,
+                  mountainElement: mountain.element,
+                  errorAmount,
+                  errorRange,
+                  exceedsThreshold,
+                };
+              }
+
+              const exceedsThreshold = m.errorAmount > snapshot.errorThreshold || m.errorAmount > 7.5;
+              return { ...m, exceedsThreshold };
+            });
+          }
+
+          return {
+            ...p,
+            magneticDeclination: snapshot.magneticDeclination,
+            errorThreshold: snapshot.errorThreshold,
+            measurements,
+            updatedAt: Date.now(),
+          };
+        })
+      );
+    },
+    []
+  );
+
   return {
     plans,
     activePlan,
@@ -289,5 +341,6 @@ export function useSurveyPlans() {
     clearMeasurements,
     duplicatePlan,
     isDuplicateMeasurement,
+    restorePlanFromSnapshot,
   };
 }

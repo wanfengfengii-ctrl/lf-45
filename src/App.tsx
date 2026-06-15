@@ -29,9 +29,6 @@ import {
   IconRulerMeasure,
   IconInfoCircle,
   IconRotate,
-  IconListDetails,
-  IconFileText,
-  IconChartBar,
   IconReport,
   IconUpload,
   IconHistory,
@@ -72,6 +69,7 @@ function App() {
     removeMeasurement,
     clearMeasurements,
     duplicatePlan,
+    restorePlanFromSnapshot,
   } = useSurveyPlans();
 
   const history = useHistory();
@@ -107,39 +105,44 @@ function App() {
     });
   }, [history, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes, activePlan]);
 
-  const applySnapshot = useCallback((snapshot: OperationSnapshot) => {
+  const applySnapshot = useCallback((snapshot: OperationSnapshot, silent: boolean = false) => {
     isApplyingSnapshotRef.current = true;
 
     setRotation(snapshot.rotation);
     lastRotationRef.current = snapshot.rotation;
 
-    if (snapshot.activePlanId && snapshot.activePlanId !== activePlanId) {
-      setActivePlan(snapshot.activePlanId);
-    }
+    setIsDrawingMode(snapshot.isDrawingMode);
+    setAxes(snapshot.axes);
 
-    if (activePlanId && snapshot.activePlanId === activePlanId) {
-      updatePlan(activePlanId, {
+    if (snapshot.activePlanId) {
+      if (snapshot.activePlanId !== activePlanId) {
+        setActivePlan(snapshot.activePlanId);
+      }
+
+      restorePlanFromSnapshot(snapshot.activePlanId, {
         magneticDeclination: snapshot.magneticDeclination,
         errorThreshold: snapshot.errorThreshold,
+        measurements: snapshot.measurements,
       });
+
       lastDeclinationRef.current = snapshot.magneticDeclination;
       lastThresholdRef.current = snapshot.errorThreshold;
     }
 
-    setIsDrawingMode(snapshot.isDrawingMode);
-    setAxes(snapshot.axes);
-
     setTimeout(() => {
       isApplyingSnapshotRef.current = false;
-    }, 50);
+    }, 100);
 
-    notifications.show({
-      title: '已恢复状态',
-      message: `罗盘：${formatAngle(snapshot.rotation)}，磁偏角：${snapshot.magneticDeclination > 0 ? '+' : ''}${snapshot.magneticDeclination.toFixed(1)}°`,
-      color: 'teal',
-      icon: <IconCheck size={18} />,
-    });
-  }, [activePlanId, setActivePlan, updatePlan]);
+    if (!silent) {
+      notifications.show({
+        title: '已恢复状态',
+        message: `罗盘：${formatAngle(snapshot.rotation)}，磁偏角：${snapshot.magneticDeclination > 0 ? '+' : ''}${snapshot.magneticDeclination.toFixed(1)}°，记录：${snapshot.measurements.length} 条`,
+        color: 'teal',
+        icon: <IconCheck size={18} />,
+        autoClose: 2000,
+      });
+    }
+  }, [activePlanId, setActivePlan, restorePlanFromSnapshot]);
 
   const currentBearingResult = useMemo<BearingResult | null>(() => {
     const rawAngle = previewAngle ?? rotation;
@@ -990,7 +993,6 @@ function App() {
 
   useEffect(() => {
     if (activePlan) {
-      const measuredIds = new Set(activePlan.measurements.map((m) => m.axisId));
       setAxes((prev) =>
         prev.map((a) => {
           const measurement = activePlan.measurements.find((m) => m.axisId === a.id);
@@ -1460,7 +1462,6 @@ function App() {
           filter={history.filter}
           statistics={history.statistics}
           plans={plans}
-          activePlan={activePlan}
           onSetFilter={history.setFilter}
           onStepForward={history.stepForward}
           onStepBackward={history.stepBackward}

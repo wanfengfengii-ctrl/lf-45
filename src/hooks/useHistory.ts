@@ -8,9 +8,8 @@ import type {
   PlaybackState,
   AxisLine,
   SurveyPlan,
-  MeasurementRecord,
 } from '@/types';
-import { generateId, formatAngle, DEFAULT_ERROR_THRESHOLD } from '@/utils/compass';
+import { generateId, formatAngle } from '@/utils/compass';
 
 const STORAGE_KEY = 'compass-operation-history';
 const MAX_RECORDS = 2000;
