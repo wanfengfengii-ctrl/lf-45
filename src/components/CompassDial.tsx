@@ -1,10 +1,12 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import * as d3 from 'd3';
-import type { Point, AxisLine } from '@/types';
+import type { Point, AxisLine, EnvironmentElement, FengShuiRisk } from '@/types';
 import {
   TWENTY_FOUR_MOUNTAINS,
   ELEMENT_COLORS,
   DIRECTION_COLORS,
+  ENV_ELEMENT_COLORS,
+  RISK_LEVEL_COLORS,
   normalizeAngle,
   pointsToAngle,
   linePassesThroughCenter,
@@ -20,6 +22,9 @@ interface CompassDialProps {
   axes: AxisLine[];
   magneticDeclination: number;
   onPreviewAngleChange?: (angle: number | null) => void;
+  environmentElements?: EnvironmentElement[];
+  showEnvironmentOverlay?: boolean;
+  risks?: FengShuiRisk[];
 }
 
 export const CompassDial: React.FC<CompassDialProps> = ({
@@ -31,6 +36,9 @@ export const CompassDial: React.FC<CompassDialProps> = ({
   axes,
   magneticDeclination,
   onPreviewAngleChange,
+  environmentElements = [],
+  showEnvironmentOverlay = true,
+  risks = [],
 }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -353,6 +361,123 @@ export const CompassDial: React.FC<CompassDialProps> = ({
       }
     });
 
+    if (showEnvironmentOverlay && environmentElements.length > 0) {
+      const envOverlayGroup = svg.append('g').attr('class', 'env-overlay');
+      const envArcGenerator = d3.arc();
+      const distanceRadii = { near: mountainInnerRadius - 15, medium: mountainInnerRadius - 35, far: mountainInnerRadius - 55 };
+
+      environmentElements.forEach((el) => {
+        const elColor = ENV_ELEMENT_COLORS[el.type] || '#9ca3af';
+        const innerR = Math.max(10, distanceRadii[el.distance] - 8);
+        const outerR = distanceRadii[el.distance] + 4;
+
+        const startAngle = ((el.startAngle - 90) * Math.PI) / 180;
+        let endAngle = ((el.endAngle - 90) * Math.PI) / 180;
+
+        if (endAngle < startAngle) {
+          endAngle += 2 * Math.PI;
+        }
+
+        const arcPath = envArcGenerator({
+          innerRadius: innerR,
+          outerRadius: outerR,
+          startAngle,
+          endAngle,
+        });
+
+        envOverlayGroup
+          .append('path')
+          .attr('d', arcPath || '')
+          .attr('fill', elColor)
+          .attr('opacity', 0.35)
+          .attr('stroke', elColor)
+          .attr('stroke-width', 2);
+
+        const midAngleDeg = (el.startAngle + el.endAngle) / 2;
+        const midRad = ((midAngleDeg - 90) * Math.PI) / 180;
+        const labelR = (innerR + outerR) / 2;
+        const lx = center + labelR * Math.cos(midRad);
+        const ly = center + labelR * Math.sin(midRad);
+
+        envOverlayGroup
+          .append('text')
+          .attr('x', lx)
+          .attr('y', ly)
+          .attr('text-anchor', 'middle')
+          .attr('dominant-baseline', 'middle')
+          .attr('font-size', '10px')
+          .attr('font-weight', '600')
+          .attr('fill', elColor)
+          .attr('paint-order', 'stroke')
+          .attr('stroke', '#fff')
+          .attr('stroke-width', 2)
+          .text(el.label);
+      });
+    }
+
+    if (risks.length > 0) {
+      const riskGroup = svg.append('g').attr('class', 'risk-overlay');
+      const riskArcGenerator = d3.arc();
+
+      risks.forEach((risk) => {
+        if (risk.level === 'safe') return;
+
+        const riskColor = RISK_LEVEL_COLORS[risk.level];
+        let sectorStart: number;
+        let sectorEnd: number;
+
+        if (risk.type === 'chong_sha') {
+          const oppBearing = normalizeAngle(risk.axisBearing + 180);
+          sectorStart = oppBearing - 7.5;
+          sectorEnd = oppBearing + 7.5;
+        } else if (risk.type === 'zhe_dang') {
+          sectorStart = risk.axisBearing - 15;
+          sectorEnd = risk.axisBearing + 15;
+        } else {
+          sectorStart = risk.axisBearing - 10;
+          sectorEnd = risk.axisBearing + 10;
+        }
+
+        const startRad = ((sectorStart - 90) * Math.PI) / 180;
+        const endRad = ((sectorEnd - 90) * Math.PI) / 180;
+
+        const riskArcPath = riskArcGenerator({
+          innerRadius: centerRingRadius + 5,
+          outerRadius: tickInnerRadius - 10,
+          startAngle: startRad,
+          endAngle: endRad > startRad ? endRad : endRad + 2 * Math.PI,
+        });
+
+        riskGroup
+          .append('path')
+          .attr('d', riskArcPath || '')
+          .attr('fill', riskColor)
+          .attr('opacity', risk.level === 'critical' ? 0.25 : risk.level === 'warning' ? 0.15 : 0.1)
+          .attr('stroke', riskColor)
+          .attr('stroke-width', risk.level === 'critical' ? 2.5 : 1.5)
+          .attr('stroke-dasharray', risk.level === 'critical' ? '6,3' : '4,3');
+
+        if (risk.level === 'critical') {
+          const midAngleDeg = (sectorStart + sectorEnd) / 2;
+          const midAngleRad = ((midAngleDeg - 90) * Math.PI) / 180;
+          const warnR = tickInnerRadius - 15;
+          const wx = center + warnR * Math.cos(midAngleRad);
+          const wy = center + warnR * Math.sin(midAngleRad);
+
+          riskGroup
+            .append('text')
+            .attr('x', wx)
+            .attr('y', wy)
+            .attr('text-anchor', 'middle')
+            .attr('dominant-baseline', 'middle')
+            .attr('font-size', '16px')
+            .attr('fill', riskColor)
+            .attr('font-weight', 'bold')
+            .text('⚠');
+        }
+      });
+    }
+
     if (drawingState.start && drawingState.current) {
       const start = drawingState.start;
       const end = drawingState.current;
@@ -406,6 +531,9 @@ export const CompassDial: React.FC<CompassDialProps> = ({
     drawingState,
     magneticDeclination,
     onPreviewAngleChange,
+    environmentElements,
+    showEnvironmentOverlay,
+    risks,
   ]);
 
   const handleMouseDown = useCallback(

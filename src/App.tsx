@@ -32,6 +32,7 @@ import {
   IconReport,
   IconUpload,
   IconHistory,
+  IconMap,
 } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 
@@ -42,8 +43,10 @@ import { BatchInputModal } from '@/components/BatchInputModal';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
 import { AnalysisReportModal } from '@/components/AnalysisReportModal';
 import { HistoryPlaybackPanel } from '@/components/HistoryPlaybackPanel';
+import { EnvironmentOverlayPanel } from '@/components/EnvironmentOverlayPanel';
 import { useSurveyPlans } from '@/hooks/useSurveyPlans';
 import { useHistory } from '@/hooks/useHistory';
+import { useEnvironmentOverlay } from '@/hooks/useEnvironmentOverlay';
 import type { AxisLine, BearingResult, OperationSnapshot } from '@/types';
 import {
   pointsToAngle,
@@ -73,6 +76,19 @@ function App() {
   } = useSurveyPlans();
 
   const history = useHistory();
+
+  const {
+    elements: envElements,
+    showOverlay: showEnvOverlay,
+    analysis: envAnalysis,
+    addElement: addEnvElement,
+    removeElement: removeEnvElement,
+    clearElements: clearEnvElements,
+    toggleOverlay: toggleEnvOverlay,
+    setShowOverlay: setShowEnvOverlay,
+  } = useEnvironmentOverlay(activePlan?.measurements ?? []);
+
+  const [envDrawerOpen, { open: openEnvDrawer, close: closeEnvDrawer }] = useDisclosure(false);
 
   const [rotation, setRotation] = useState(0);
   const [isDrawingMode, setIsDrawingMode] = useState(false);
@@ -1021,7 +1037,7 @@ function App() {
           传统罗盘模拟系统
         </Text>
         <Text size="xs" c="dimmed">
-          二十四山 · 磁偏角校正 · 建筑轴线测量
+          二十四山 · 磁偏角校正 · 建筑轴线测量 · 环境叠加分析
         </Text>
       </Stack>
     </Group>
@@ -1044,6 +1060,28 @@ function App() {
           <Group h="100%" justify="space-between">
             {headerTitle}
             <Group>
+              <Tooltip label="选址环境叠加与风水敏感区分析" withArrow>
+                <Button
+                  variant={envDrawerOpen ? 'filled' : 'light'}
+                  color="teal"
+                  size="md"
+                  leftSection={<IconMap size={18} />}
+                  onClick={openEnvDrawer}
+                >
+                  环境叠加
+                  {envAnalysis.criticalCount + envAnalysis.warningCount > 0 && (
+                    <Badge
+                      color="red"
+                      size="xs"
+                      variant="filled"
+                      circle
+                      ml={4}
+                    >
+                      {envAnalysis.criticalCount + envAnalysis.warningCount}
+                    </Badge>
+                  )}
+                </Button>
+              </Tooltip>
               <Tooltip label="历史回放与过程审计" withArrow>
                 <Button
                   variant={historyDrawerOpen ? 'filled' : 'light'}
@@ -1172,6 +1210,9 @@ function App() {
                     axes={axes}
                     magneticDeclination={magneticDeclination}
                     onPreviewAngleChange={setPreviewAngle}
+                    environmentElements={envElements}
+                    showEnvironmentOverlay={showEnvOverlay}
+                    risks={envAnalysis.risks}
                   />
 
                   <Group mt="md" justify="center" gap="xs">
@@ -1475,6 +1516,39 @@ function App() {
           onDeleteRecord={history.deleteRecord}
           onExportHistory={history.exportHistory}
           onApplySnapshot={applySnapshot}
+        />
+      </Drawer>
+
+      <Drawer
+        opened={envDrawerOpen}
+        onClose={closeEnvDrawer}
+        title={
+          <Group>
+            <ThemeIcon size="md" radius="md" color="teal" variant="filled">
+              <IconMap size={18} />
+            </ThemeIcon>
+            <Stack gap={0}>
+              <Text fw={600}>选址环境叠加与风水敏感区分析</Text>
+              <Text size="xs" c="dimmed">
+                环境要素 {envElements.length} 个 · 风险 {envAnalysis.risks.length} 处
+              </Text>
+            </Stack>
+          </Group>
+        }
+        position="left"
+        size={480}
+        padding="lg"
+        scrollAreaComponent={ScrollArea.Autosize}
+      >
+        <EnvironmentOverlayPanel
+          elements={envElements}
+          showOverlay={showEnvOverlay}
+          analysis={envAnalysis}
+          onAddElement={addEnvElement}
+          onRemoveElement={removeEnvElement}
+          onClearElements={clearEnvElements}
+          onToggleOverlay={toggleEnvOverlay}
+          onShowOverlayChange={setShowEnvOverlay}
         />
       </Drawer>
     </AppShell>

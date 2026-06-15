@@ -161,6 +161,47 @@ export interface HistoryFilter {
   keyword?: string;
 }
 
+export type EnvironmentElementType = 'road' | 'water' | 'building' | 'entrance';
+
+export interface EnvironmentElement {
+  id: string;
+  type: EnvironmentElementType;
+  label: string;
+  startAngle: number;
+  endAngle: number;
+  distance: 'near' | 'medium' | 'far';
+  description?: string;
+}
+
+export type FengShuiRiskLevel = 'critical' | 'warning' | 'caution' | 'safe';
+
+export type FengShuiRiskType = 'chong_sha' | 'pian_xie' | 'zhe_dang';
+
+export interface FengShuiRisk {
+  id: string;
+  type: FengShuiRiskType;
+  level: FengShuiRiskLevel;
+  axisLabel: string;
+  axisBearing: number;
+  elementId: string;
+  elementLabel: string;
+  elementType: EnvironmentElementType;
+  description: string;
+  angleDiff: number;
+  suggestion: string;
+}
+
+export interface EnvironmentAnalysisResult {
+  risks: FengShuiRisk[];
+  criticalCount: number;
+  warningCount: number;
+  cautionCount: number;
+  safeCount: number;
+  overallLevel: FengShuiRiskLevel;
+  summary: string;
+  suggestions: string[];
+}
+
 export interface PlaybackState {
   isPlaying: boolean;
   currentIndex: number;
