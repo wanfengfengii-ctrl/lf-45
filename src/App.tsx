@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import {
   AppShell,
   Container,
@@ -47,16 +47,15 @@ import { EnvironmentOverlayPanel } from '@/components/EnvironmentOverlayPanel';
 import { useSurveyPlans } from '@/hooks/useSurveyPlans';
 import { useHistory } from '@/hooks/useHistory';
 import { useEnvironmentOverlay } from '@/hooks/useEnvironmentOverlay';
-import type { AxisLine, BearingResult, OperationSnapshot } from '@/types';
+import { useCompassState } from '@/hooks/useCompassState';
+import type { BearingResult, OperationSnapshot } from '@/types';
 import {
+  formatAngle,
+  batchInputToResults,
   pointsToAngle,
   calculateBearingResult,
-  generateId,
-  clampAngle,
-  clampDeclination,
   DEFAULT_ERROR_THRESHOLD,
-  formatAngle,
-} from '@/utils/compass';
+} from '@/utils/domain';
 
 function App() {
   const {
@@ -73,6 +72,7 @@ function App() {
     clearMeasurements,
     duplicatePlan,
     restorePlanFromSnapshot,
+    batchAddMeasurements,
   } = useSurveyPlans();
 
   const history = useHistory();
@@ -90,45 +90,43 @@ function App() {
 
   const [envDrawerOpen, { open: openEnvDrawer, close: closeEnvDrawer }] = useDisclosure(false);
 
-  const [rotation, setRotation] = useState(0);
-  const [isDrawingMode, setIsDrawingMode] = useState(false);
-  const [axes, setAxes] = useState<AxisLine[]>([]);
-  const [previewAngle, setPreviewAngle] = useState<number | null>(null);
-  const [saveModalOpen, { open: openSave, close: closeSave }] = useDisclosure(false);
-  const [pendingAxis, setPendingAxis] = useState<AxisLine | null>(null);
-  const [axisLabel, setAxisLabel] = useState('');
+  const magneticDeclination = activePlan?.magneticDeclination ?? 0;
+  const errorThreshold = activePlan?.errorThreshold ?? DEFAULT_ERROR_THRESHOLD;
+
+  const compass = useCompassState({
+    magneticDeclination,
+    errorThreshold,
+    activePlan,
+  });
+
   const [showHelp, { open: openHelp, close: closeHelp }] = useDisclosure(false);
   const [batchInputModalOpen, { open: openBatchInput, close: closeBatchInput }] = useDisclosure(false);
   const [analysisReportModalOpen, { open: openAnalysisReport, close: closeAnalysisReport }] = useDisclosure(false);
   const [historyDrawerOpen, { open: openHistoryDrawer, close: closeHistoryDrawer }] = useDisclosure(false);
 
-  const lastRotationRef = useRef(rotation);
-  const lastDeclinationRef = useRef(activePlan?.magneticDeclination ?? 0);
-  const lastThresholdRef = useRef(activePlan?.errorThreshold ?? DEFAULT_ERROR_THRESHOLD);
+  const lastDeclinationRef = useRef(magneticDeclination);
+  const lastThresholdRef = useRef(errorThreshold);
   const isApplyingSnapshotRef = useRef(false);
-
-  const magneticDeclination = activePlan?.magneticDeclination ?? 0;
-  const errorThreshold = activePlan?.errorThreshold ?? DEFAULT_ERROR_THRESHOLD;
 
   const getCurrentSnapshot = useCallback((): OperationSnapshot => {
     return history.createSnapshot({
-      rotation,
+      rotation: compass.rotation,
       magneticDeclination,
       errorThreshold,
-      isDrawingMode,
-      axes,
+      isDrawingMode: compass.isDrawingMode,
+      axes: compass.axes,
       activePlan,
     });
-  }, [history, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes, activePlan]);
+  }, [history, compass.rotation, magneticDeclination, errorThreshold, compass.isDrawingMode, compass.axes, activePlan]);
 
   const applySnapshot = useCallback((snapshot: OperationSnapshot, silent: boolean = false) => {
     isApplyingSnapshotRef.current = true;
 
-    setRotation(snapshot.rotation);
-    lastRotationRef.current = snapshot.rotation;
-
-    setIsDrawingMode(snapshot.isDrawingMode);
-    setAxes(snapshot.axes);
+    compass.applySnapshotData({
+      rotation: snapshot.rotation,
+      isDrawingMode: snapshot.isDrawingMode,
+      axes: snapshot.axes,
+    });
 
     if (snapshot.activePlanId) {
       if (snapshot.activePlanId !== activePlanId) {
@@ -158,115 +156,128 @@ function App() {
         autoClose: 2000,
       });
     }
-  }, [activePlanId, setActivePlan, restorePlanFromSnapshot]);
+  }, [activePlanId, setActivePlan, restorePlanFromSnapshot, compass]);
 
-  const currentBearingResult = useMemo<BearingResult | null>(() => {
-    const rawAngle = previewAngle ?? rotation;
-    if (rawAngle === null || rawAngle === undefined) return null;
-    return calculateBearingResult(
-      rawAngle,
-      rotation,
-      magneticDeclination,
-      errorThreshold
-    );
-  }, [previewAngle, rotation, magneticDeclination, errorThreshold]);
-
-  const selectedAxisResult = useMemo<BearingResult | null>(() => {
-    if (!pendingAxis) return null;
-    const rawAngle = pointsToAngle(pendingAxis.startPoint, pendingAxis.endPoint);
-    return calculateBearingResult(
-      rawAngle,
-      rotation,
-      magneticDeclination,
-      errorThreshold
-    );
-  }, [pendingAxis, rotation, magneticDeclination, errorThreshold]);
-
-  const bearingResult = pendingAxis ? selectedAxisResult : currentBearingResult;
-
-  const handleRotationChange = useCallback((newRotation: number) => {
-    const clamped = clampAngle(newRotation);
-    const oldRotation = lastRotationRef.current;
-
-    if (!isApplyingSnapshotRef.current && Math.abs(clamped - oldRotation) > 0.01) {
-      const before = getCurrentSnapshot();
-      setRotation(clamped);
-      const after = history.createSnapshot({
-        rotation: clamped,
-        magneticDeclination,
-        errorThreshold,
-        isDrawingMode,
-        axes,
-        activePlan,
-      });
-
-      history.recordOperation({
-        type: 'rotation_change',
-        description: `罗盘旋转：${formatAngle(oldRotation)} → ${formatAngle(clamped)}`,
-        severity: 'info',
-        planId: activePlanId,
-        planName: activePlan?.name,
-        beforeSnapshot: before,
-        afterSnapshot: after,
-        payload: { before: oldRotation, after: clamped },
-      });
-    } else {
-      setRotation(clamped);
+  const recordWithHistory = useCallback(<T extends unknown[]>(
+    type: string,
+    description: string,
+    action: (...args: T) => void,
+    options?: {
+      severity?: 'info' | 'warning' | 'error' | 'critical';
+      isKeyNode?: boolean;
+      payload?: Record<string, unknown>;
+      getAfterSnapshot?: () => OperationSnapshot;
     }
+  ) => {
+    return (...args: T) => {
+      if (isApplyingSnapshotRef.current) {
+        action(...args);
+        return;
+      }
 
-    lastRotationRef.current = clamped;
-  }, [getCurrentSnapshot, history, magneticDeclination, errorThreshold, isDrawingMode, axes, activePlan, activePlanId]);
+      const before = getCurrentSnapshot();
+      action(...args);
 
-  const handleDeclinationChange = useCallback(
-    (newDeclination: number) => {
-      const clamped = clampDeclination(newDeclination);
-      const oldDeclination = lastDeclinationRef.current;
+      setTimeout(() => {
+        const after = options?.getAfterSnapshot
+          ? options.getAfterSnapshot()
+          : getCurrentSnapshot();
 
-      if (activePlanId && !isApplyingSnapshotRef.current && Math.abs(clamped - oldDeclination) > 0.01) {
+        history.recordOperation({
+          type: type as any,
+          description,
+          severity: options?.severity ?? 'info',
+          isKeyNode: options?.isKeyNode,
+          planId: activePlanId,
+          planName: activePlan?.name,
+          beforeSnapshot: before,
+          afterSnapshot: after,
+          payload: options?.payload,
+        });
+      }, 10);
+    };
+  }, [getCurrentSnapshot, history, activePlanId, activePlan]);
+
+  const handleRotationChange = useCallback(
+    (newRotation: number) => {
+      const oldRotation = compass.lastRotationRef.current;
+      compass.handleRotationChange(newRotation);
+
+      if (!isApplyingSnapshotRef.current && Math.abs(newRotation - oldRotation) > 0.01) {
         const before = getCurrentSnapshot();
-        updateMagneticDeclination(activePlanId, clamped);
         const after = history.createSnapshot({
-          rotation,
-          magneticDeclination: clamped,
+          rotation: newRotation,
+          magneticDeclination,
           errorThreshold,
-          isDrawingMode,
-          axes,
+          isDrawingMode: compass.isDrawingMode,
+          axes: compass.axes,
           activePlan,
         });
 
         history.recordOperation({
-          type: 'declination_change',
-          description: `磁偏角调整：${oldDeclination > 0 ? '+' : ''}${oldDeclination.toFixed(1)}° → ${clamped > 0 ? '+' : ''}${clamped.toFixed(1)}°`,
+          type: 'rotation_change',
+          description: `罗盘旋转：${formatAngle(oldRotation)} → ${formatAngle(newRotation)}`,
           severity: 'info',
           planId: activePlanId,
           planName: activePlan?.name,
           beforeSnapshot: before,
           afterSnapshot: after,
-          payload: { before: oldDeclination, after: clamped },
+          payload: { before: oldRotation, after: newRotation },
+        });
+      }
+    },
+    [compass, getCurrentSnapshot, history, magneticDeclination, errorThreshold, activePlan, activePlanId]
+  );
+
+  const handleDeclinationChange = useCallback(
+    (newDeclination: number) => {
+      const oldDeclination = lastDeclinationRef.current;
+
+      if (activePlanId && !isApplyingSnapshotRef.current && Math.abs(newDeclination - oldDeclination) > 0.01) {
+        const before = getCurrentSnapshot();
+        updateMagneticDeclination(activePlanId, newDeclination);
+        const after = history.createSnapshot({
+          rotation: compass.rotation,
+          magneticDeclination: newDeclination,
+          errorThreshold,
+          isDrawingMode: compass.isDrawingMode,
+          axes: compass.axes,
+          activePlan,
+        });
+
+        history.recordOperation({
+          type: 'declination_change',
+          description: `磁偏角调整：${oldDeclination > 0 ? '+' : ''}${oldDeclination.toFixed(1)}° → ${newDeclination > 0 ? '+' : ''}${newDeclination.toFixed(1)}°`,
+          severity: 'info',
+          planId: activePlanId,
+          planName: activePlan?.name,
+          beforeSnapshot: before,
+          afterSnapshot: after,
+          payload: { before: oldDeclination, after: newDeclination },
         });
       } else if (activePlanId) {
-        updateMagneticDeclination(activePlanId, clamped);
+        updateMagneticDeclination(activePlanId, newDeclination);
       }
 
-      lastDeclinationRef.current = clamped;
+      lastDeclinationRef.current = newDeclination;
     },
-    [activePlanId, updateMagneticDeclination, getCurrentSnapshot, history, rotation, errorThreshold, isDrawingMode, axes, activePlan]
+    [activePlanId, updateMagneticDeclination, getCurrentSnapshot, history, compass.rotation, errorThreshold, compass.isDrawingMode, compass.axes, activePlan]
   );
 
   const handleErrorThresholdChange = useCallback(
     (newThreshold: number) => {
-      const clamped = Math.max(0.1, newThreshold);
       const oldThreshold = lastThresholdRef.current;
+      const clamped = Math.max(0.1, newThreshold);
 
       if (activePlanId && !isApplyingSnapshotRef.current && Math.abs(clamped - oldThreshold) > 0.01) {
         const before = getCurrentSnapshot();
         updatePlan(activePlanId, { errorThreshold: clamped });
         const after = history.createSnapshot({
-          rotation,
+          rotation: compass.rotation,
           magneticDeclination,
           errorThreshold: clamped,
-          isDrawingMode,
-          axes,
+          isDrawingMode: compass.isDrawingMode,
+          axes: compass.axes,
           activePlan,
         });
 
@@ -286,20 +297,20 @@ function App() {
 
       lastThresholdRef.current = clamped;
     },
-    [activePlanId, updatePlan, getCurrentSnapshot, history, rotation, magneticDeclination, isDrawingMode, axes, activePlan]
+    [activePlanId, updatePlan, getCurrentSnapshot, history, compass.rotation, magneticDeclination, compass.isDrawingMode, compass.axes, activePlan]
   );
 
   const handleDrawingModeToggle = useCallback(
     (enabled: boolean) => {
-      if (!isApplyingSnapshotRef.current && enabled !== isDrawingMode) {
+      if (!isApplyingSnapshotRef.current && enabled !== compass.isDrawingMode) {
         const before = getCurrentSnapshot();
-        setIsDrawingMode(enabled);
+        compass.handleDrawingModeToggle(enabled);
         const after = history.createSnapshot({
-          rotation,
+          rotation: compass.rotation,
           magneticDeclination,
           errorThreshold,
           isDrawingMode: enabled,
-          axes,
+          axes: compass.axes,
           activePlan,
         });
 
@@ -314,17 +325,47 @@ function App() {
           payload: { enabled },
         });
       } else {
-        setIsDrawingMode(enabled);
+        compass.handleDrawingModeToggle(enabled);
       }
     },
-    [isDrawingMode, getCurrentSnapshot, history, rotation, magneticDeclination, errorThreshold, axes, activePlan, activePlanId]
+    [compass.isDrawingMode, compass.handleDrawingModeToggle, getCurrentSnapshot, history, compass.rotation, magneticDeclination, errorThreshold, compass.axes, activePlan, activePlanId]
   );
 
   const handleAxisDrawn = useCallback(
-    (axis: AxisLine) => {
+    (axis: any) => {
       const before = getCurrentSnapshot();
+      const result = compass.handleAxisDrawn(axis);
 
-      if (!axis.passesCenter) {
+      if (!isApplyingSnapshotRef.current) {
+        const angle = pointsToAngle(axis.startPoint, axis.endPoint);
+        const after = history.createSnapshot({
+          rotation: compass.rotation,
+          magneticDeclination,
+          errorThreshold,
+          isDrawingMode: compass.isDrawingMode,
+          axes: compass.axes,
+          activePlan,
+        });
+
+        history.recordOperation({
+          type: 'axis_draw',
+          description: result.valid
+            ? `绘制轴线：${result.result ? formatAngle(result.result.correctedBearing) : ''}`
+            : `绘制无效轴线（未过中心点），角度：${formatAngle(angle)}`,
+          severity: result.valid ? 'info' : 'warning',
+          planId: activePlanId,
+          planName: activePlan?.name,
+          beforeSnapshot: before,
+          afterSnapshot: after,
+          payload: {
+            angle: result.valid ? result.result?.correctedBearing : angle,
+            label: result.valid ? '轴线' : '无效轴线',
+            passesCenter: result.valid,
+          },
+        });
+      }
+
+      if (!result.valid) {
         notifications.show({
           title: '轴线无效',
           message: '建筑轴线必须经过罗盘中心点才能完成测量',
@@ -332,87 +373,19 @@ function App() {
           icon: <IconAlertCircle size={18} />,
           autoClose: 4000,
         });
-
-        const newAxes = [...axes, { ...axis, passesCenter: false }];
-        setAxes(newAxes);
-
-        if (!isApplyingSnapshotRef.current) {
-          const angle = pointsToAngle(axis.startPoint, axis.endPoint);
-          const after = history.createSnapshot({
-            rotation,
-            magneticDeclination,
-            errorThreshold,
-            isDrawingMode,
-            axes: newAxes,
-            activePlan,
-          });
-
-          history.recordOperation({
-            type: 'axis_draw',
-            description: `绘制无效轴线（未过中心点），角度：${formatAngle(angle)}`,
-            severity: 'warning',
-            planId: activePlanId,
-            planName: activePlan?.name,
-            beforeSnapshot: before,
-            afterSnapshot: after,
-            payload: { angle, label: '无效轴线', passesCenter: false },
-          });
-        }
-        return;
-      }
-
-      const angle = pointsToAngle(axis.startPoint, axis.endPoint);
-      const result = calculateBearingResult(angle, rotation, magneticDeclination, errorThreshold);
-
-      const newAxes = [...axes, axis];
-      setAxes(newAxes);
-
-      const axisNumber = axes.filter((a) => a.passesCenter).length + 1;
-      const defaultLabel = `轴线${axisNumber}`;
-      setAxisLabel(defaultLabel);
-      setPendingAxis(axis);
-      openSave();
-
-      if (!isApplyingSnapshotRef.current) {
-        const after = history.createSnapshot({
-          rotation,
-          magneticDeclination,
-          errorThreshold,
-          isDrawingMode,
-          axes: newAxes,
-          activePlan,
-        });
-
-        history.recordOperation({
-          type: 'axis_draw',
-          description: `绘制轴线：${defaultLabel}（${formatAngle(result.correctedBearing)}）`,
-          severity: 'info',
-          planId: activePlanId,
-          planName: activePlan?.name,
-          beforeSnapshot: before,
-          afterSnapshot: after,
-          payload: {
-            angle: result.correctedBearing,
-            label: defaultLabel,
-            passesCenter: true,
-          },
+      } else if (result.result) {
+        notifications.show({
+          title: '轴线已绘制',
+          message: `方位: ${formatAngle(result.result.correctedBearing)}, 归属: ${result.result.mountain.name}山`,
+          color: result.result.exceedsThreshold ? 'orange' : 'green',
+          icon: result.result.exceedsThreshold ? <IconAlertCircle size={18} /> : <IconCheck size={18} />,
         });
       }
-
-      notifications.show({
-        title: '轴线已绘制',
-        message: `方位: ${formatAngle(result.correctedBearing)}, 归属: ${result.mountain.name}山`,
-        color: result.exceedsThreshold ? 'orange' : 'green',
-        icon: result.exceedsThreshold ? <IconAlertCircle size={18} /> : <IconCheck size={18} />,
-      });
     },
     [
-      axes,
-      rotation,
+      compass,
       magneticDeclination,
       errorThreshold,
-      openSave,
-      isDrawingMode,
       activePlan,
       activePlanId,
       getCurrentSnapshot,
@@ -421,72 +394,65 @@ function App() {
   );
 
   const handleSaveMeasurement = useCallback(() => {
-    if (!pendingAxis || !activePlanId) {
-      closeSave();
+    const result = compass.handleSaveMeasurement();
+
+    if (!result.success) {
+      if (!compass.pendingAxis) {
+        compass.closeSaveModal();
+      } else {
+        notifications.show({
+          title: '保存失败',
+          message: '请输入轴线标签',
+          color: 'red',
+          icon: <IconX size={18} />,
+        });
+      }
       return;
     }
 
-    if (!axisLabel.trim()) {
-      notifications.show({
-        title: '保存失败',
-        message: '请输入轴线标签',
-        color: 'red',
-        icon: <IconX size={18} />,
-      });
-      return;
-    }
-
-    const angle = pointsToAngle(pendingAxis.startPoint, pendingAxis.endPoint);
-    const result = calculateBearingResult(angle, rotation, magneticDeclination, errorThreshold);
-
-    const axisWithLabel = {
-      ...pendingAxis,
-      label: axisLabel.trim(),
-    };
-    const newAxes = axes.map((a) => (a.id === pendingAxis.id ? axisWithLabel : a));
-    setAxes(newAxes);
+    if (!activePlanId || !result.result || !result.axisId || !result.axisLabel) return;
 
     const before = getCurrentSnapshot();
 
     const { success, duplicate } = addMeasurement(activePlanId, {
-      axisId: pendingAxis.id,
-      axisLabel: axisLabel.trim(),
-      compassReading: result.compassReading,
-      trueBearing: result.trueBearing,
-      correctedBearing: result.correctedBearing,
-      mountainName: result.mountain.name,
-      mountainElement: result.mountain.element,
-      errorRange: result.errorRange,
-      errorAmount: result.errorAmount,
-      exceedsThreshold: result.exceedsThreshold,
+      axisId: result.axisId,
+      axisLabel: result.axisLabel,
+      compassReading: result.result.compassReading,
+      trueBearing: result.result.trueBearing,
+      correctedBearing: result.result.correctedBearing,
+      mountainName: result.result.mountain.name,
+      mountainElement: result.result.mountain.element,
+      errorRange: result.result.errorRange,
+      errorAmount: result.result.errorAmount,
+      exceedsThreshold: result.result.exceedsThreshold,
     });
 
     if (!isApplyingSnapshotRef.current && success) {
       setTimeout(() => {
         const updatedActivePlan = plans.find((p) => p.id === activePlanId) || activePlan;
         const after = history.createSnapshot({
-          rotation,
+          rotation: compass.rotation,
           magneticDeclination,
           errorThreshold,
           isDrawingMode: false,
-          axes: newAxes,
+          axes: compass.axes,
           activePlan: updatedActivePlan,
         });
 
         history.recordOperation({
           type: 'axis_save',
-          description: `保存测量「${axisLabel.trim()}」：${formatAngle(result.correctedBearing)}，误差 ${result.errorAmount.toFixed(2)}°`,
-          severity: result.exceedsThreshold ? 'warning' : 'info',
+          description: `保存测量「${result.axisLabel}」：${formatAngle(result.result!.correctedBearing)}，误差 ${result.result!.errorAmount.toFixed(2)}°`,
+          severity: result.result!.exceedsThreshold ? 'warning' : 'info',
           planId: activePlanId,
           planName: activePlan?.name,
           beforeSnapshot: before,
           afterSnapshot: after,
           payload: {
-            label: axisLabel.trim(),
-            bearing: result.correctedBearing,
-            error: result.errorAmount,
-            exceedsThreshold: result.exceedsThreshold,
-            mountain: result.mountain.name,
+            label: result.axisLabel,
+            bearing: result.result!.correctedBearing,
+            error: result.result!.errorAmount,
+            exceedsThreshold: result.result!.exceedsThreshold,
+            mountain: result.result!.mountain.name,
           },
         });
       }, 10);
@@ -503,50 +469,39 @@ function App() {
     } else if (success) {
       notifications.show({
         title: '保存成功',
-        message: result.exceedsThreshold
-          ? `记录已保存，但误差 ${result.errorAmount.toFixed(2)}° 超出阈值`
-          : `「${axisLabel.trim()}」测量记录已保存`,
-        color: result.exceedsThreshold ? 'orange' : 'green',
+        message: result.result.exceedsThreshold
+          ? `记录已保存，但误差 ${result.result.errorAmount.toFixed(2)}° 超出阈值`
+          : `「${result.axisLabel}」测量记录已保存`,
+        color: result.result.exceedsThreshold ? 'orange' : 'green',
         icon: <IconDeviceFloppy size={18} />,
       });
     }
-
-    setPendingAxis(null);
-    setAxisLabel('');
-    closeSave();
-    setIsDrawingMode(false);
   }, [
-    pendingAxis,
+    compass,
     activePlanId,
-    axisLabel,
-    rotation,
-    magneticDeclination,
-    errorThreshold,
-    axes,
-    addMeasurement,
-    closeSave,
     activePlan,
     plans,
     history,
+    addMeasurement,
     getCurrentSnapshot,
+    magneticDeclination,
+    errorThreshold,
   ]);
 
   const handleCancelSave = useCallback(() => {
     const before = getCurrentSnapshot();
-    let newAxes = axes;
+    const pendingAxis = compass.pendingAxis;
+    const axisLabel = compass.axisLabel;
 
-    if (pendingAxis) {
-      newAxes = axes.filter((a) => a.id !== pendingAxis.id);
-      setAxes(newAxes);
-    }
+    compass.handleCancelSave();
 
     if (!isApplyingSnapshotRef.current && pendingAxis) {
       const after = history.createSnapshot({
-        rotation,
+        rotation: compass.rotation,
         magneticDeclination,
         errorThreshold,
-        isDrawingMode,
-        axes: newAxes,
+        isDrawingMode: compass.isDrawingMode,
+        axes: compass.axes,
         activePlan,
       });
 
@@ -561,24 +516,19 @@ function App() {
         payload: { label: axisLabel || pendingAxis.label || '未命名' },
       });
     }
-
-    setPendingAxis(null);
-    setAxisLabel('');
-    closeSave();
-  }, [pendingAxis, axes, closeSave, axisLabel, isDrawingMode, activePlan, activePlanId, getCurrentSnapshot, history, rotation, magneticDeclination, errorThreshold]);
+  }, [compass, getCurrentSnapshot, history, magneticDeclination, errorThreshold, activePlan, activePlanId]);
 
   const handleResetCompass = useCallback(() => {
     const before = getCurrentSnapshot();
-    setRotation(0);
-    lastRotationRef.current = 0;
+    compass.handleResetCompass();
 
     if (!isApplyingSnapshotRef.current) {
       const after = history.createSnapshot({
         rotation: 0,
         magneticDeclination,
         errorThreshold,
-        isDrawingMode,
-        axes,
+        isDrawingMode: compass.isDrawingMode,
+        axes: compass.axes,
         activePlan,
       });
 
@@ -599,20 +549,19 @@ function App() {
       color: 'blue',
       icon: <IconRotate size={18} />,
     });
-  }, [getCurrentSnapshot, history, magneticDeclination, errorThreshold, isDrawingMode, axes, activePlan, activePlanId]);
+  }, [getCurrentSnapshot, history, compass, magneticDeclination, errorThreshold, activePlan, activePlanId]);
 
   const handleClearAxes = useCallback(() => {
     const before = getCurrentSnapshot();
-    const count = axes.length;
-    setAxes([]);
-    setPendingAxis(null);
+    const count = compass.axes.length;
+    compass.handleClearAxes();
 
     if (!isApplyingSnapshotRef.current && count > 0) {
       const after = history.createSnapshot({
-        rotation,
+        rotation: compass.rotation,
         magneticDeclination,
         errorThreshold,
-        isDrawingMode,
+        isDrawingMode: compass.isDrawingMode,
         axes: [],
         activePlan,
       });
@@ -635,7 +584,7 @@ function App() {
       color: 'gray',
       icon: <IconTrash size={18} />,
     });
-  }, [getCurrentSnapshot, history, axes, rotation, magneticDeclination, errorThreshold, isDrawingMode, activePlan, activePlanId]);
+  }, [getCurrentSnapshot, history, compass, magneticDeclination, errorThreshold, activePlan, activePlanId]);
 
   const handleSetActivePlan = useCallback(
     (planId: string) => {
@@ -649,11 +598,11 @@ function App() {
         setTimeout(() => {
           const latestPlan = plans.find((p) => p.id === planId) || newPlan;
           const after = history.createSnapshot({
-            rotation,
+            rotation: compass.rotation,
             magneticDeclination: latestPlan?.magneticDeclination ?? magneticDeclination,
             errorThreshold: latestPlan?.errorThreshold ?? errorThreshold,
-            isDrawingMode,
-            axes,
+            isDrawingMode: compass.isDrawingMode,
+            axes: compass.axes,
             activePlan: latestPlan ?? null,
           });
 
@@ -679,7 +628,7 @@ function App() {
         lastThresholdRef.current = newPlan.errorThreshold;
       }
     },
-    [getCurrentSnapshot, history, activePlan, plans, setActivePlan, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes]
+    [getCurrentSnapshot, history, activePlan, plans, setActivePlan, compass, magneticDeclination, errorThreshold]
   );
 
   const handleCreatePlan = useCallback(
@@ -689,11 +638,11 @@ function App() {
 
       if (!isApplyingSnapshotRef.current) {
         const after = history.createSnapshot({
-          rotation,
+          rotation: compass.rotation,
           magneticDeclination,
           errorThreshold,
-          isDrawingMode,
-          axes,
+          isDrawingMode: compass.isDrawingMode,
+          axes: compass.axes,
           activePlan: newPlan ?? activePlan,
         });
 
@@ -709,7 +658,7 @@ function App() {
         });
       }
     },
-    [getCurrentSnapshot, history, createPlan, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes, activePlan]
+    [getCurrentSnapshot, history, createPlan, compass, magneticDeclination, errorThreshold, activePlan]
   );
 
   const handleDeletePlan = useCallback(
@@ -721,11 +670,11 @@ function App() {
 
       if (!isApplyingSnapshotRef.current && plan) {
         const after = history.createSnapshot({
-          rotation,
+          rotation: compass.rotation,
           magneticDeclination,
           errorThreshold,
-          isDrawingMode,
-          axes,
+          isDrawingMode: compass.isDrawingMode,
+          axes: compass.axes,
           activePlan: planId === activePlanId
             ? plans.find((p) => p.id !== planId) ?? null
             : activePlan,
@@ -746,7 +695,7 @@ function App() {
         });
       }
     },
-    [getCurrentSnapshot, history, plans, deletePlan, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes, activePlan, activePlanId]
+    [getCurrentSnapshot, history, plans, deletePlan, compass, magneticDeclination, errorThreshold, activePlan, activePlanId]
   );
 
   const handleUpdatePlan = useCallback(
@@ -758,11 +707,11 @@ function App() {
 
       if (!isApplyingSnapshotRef.current && (updates.name || updates.description)) {
         const after = history.createSnapshot({
-          rotation,
+          rotation: compass.rotation,
           magneticDeclination,
           errorThreshold: updates.errorThreshold ?? errorThreshold,
-          isDrawingMode,
-          axes,
+          isDrawingMode: compass.isDrawingMode,
+          axes: compass.axes,
           activePlan: plan ?? null,
         });
 
@@ -778,7 +727,7 @@ function App() {
         });
       }
     },
-    [getCurrentSnapshot, history, plans, updatePlan, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes]
+    [getCurrentSnapshot, history, plans, updatePlan, compass, magneticDeclination, errorThreshold]
   );
 
   const handleRemoveMeasurement = useCallback(
@@ -793,11 +742,11 @@ function App() {
         setTimeout(() => {
           const updatedPlan = plans.find((p) => p.id === planId) || plan;
           const after = history.createSnapshot({
-            rotation,
+            rotation: compass.rotation,
             magneticDeclination,
             errorThreshold,
-            isDrawingMode,
-            axes,
+            isDrawingMode: compass.isDrawingMode,
+            axes: compass.axes,
             activePlan: updatedPlan ?? null,
           });
 
@@ -817,7 +766,7 @@ function App() {
         }, 10);
       }
     },
-    [getCurrentSnapshot, history, plans, removeMeasurement, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes]
+    [getCurrentSnapshot, history, plans, removeMeasurement, compass, magneticDeclination, errorThreshold]
   );
 
   const handleClearMeasurements = useCallback(
@@ -831,11 +780,11 @@ function App() {
       if (!isApplyingSnapshotRef.current && count > 0) {
         setTimeout(() => {
           const after = history.createSnapshot({
-            rotation,
+            rotation: compass.rotation,
             magneticDeclination,
             errorThreshold,
-            isDrawingMode,
-            axes,
+            isDrawingMode: compass.isDrawingMode,
+            axes: compass.axes,
             activePlan: plan ? { ...plan, measurements: [] } : null,
           });
 
@@ -852,7 +801,7 @@ function App() {
         }, 10);
       }
     },
-    [getCurrentSnapshot, history, plans, clearMeasurements, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes]
+    [getCurrentSnapshot, history, plans, clearMeasurements, compass, magneticDeclination, errorThreshold]
   );
 
   const handleDuplicatePlan = useCallback(
@@ -862,11 +811,11 @@ function App() {
 
       if (!isApplyingSnapshotRef.current && newPlan) {
         const after = history.createSnapshot({
-          rotation,
+          rotation: compass.rotation,
           magneticDeclination,
           errorThreshold,
-          isDrawingMode,
-          axes,
+          isDrawingMode: compass.isDrawingMode,
+          axes: compass.axes,
           activePlan: newPlan ?? activePlan,
         });
 
@@ -884,7 +833,7 @@ function App() {
 
       return newPlan;
     },
-    [getCurrentSnapshot, history, duplicatePlan, rotation, magneticDeclination, errorThreshold, isDrawingMode, axes, activePlan]
+    [getCurrentSnapshot, history, duplicatePlan, compass, magneticDeclination, errorThreshold, activePlan]
   );
 
   const handleBatchInput = useCallback(
@@ -893,54 +842,17 @@ function App() {
 
       const before = getCurrentSnapshot();
 
-      let successCount = 0;
-      let duplicateCount = 0;
-      let exceedCount = 0;
-      const seen = new Set<string>();
+      const { successCount, duplicateCount, exceedCount } = batchAddMeasurements(
+        activePlanId,
+        items,
+        compass.rotation,
+        magneticDeclination,
+        errorThreshold
+      );
 
-      items.forEach((item) => {
-        const key = `${item.label}-${item.result.correctedBearing.toFixed(2)}`;
-
-        if (seen.has(key)) {
-          duplicateCount++;
-          return;
-        }
-        seen.add(key);
-
-        const { success, duplicate } = addMeasurement(activePlanId, {
-          axisId: `batch-${generateId()}`,
-          axisLabel: item.label,
-          compassReading: item.result.compassReading,
-          trueBearing: item.result.trueBearing,
-          correctedBearing: item.result.correctedBearing,
-          mountainName: item.result.mountain.name,
-          mountainElement: item.result.mountain.element,
-          errorRange: item.result.errorRange,
-          errorAmount: item.result.errorAmount,
-          exceedsThreshold: item.result.exceedsThreshold,
-        });
-
-        if (success) {
-          successCount++;
-          if (item.result.exceedsThreshold) exceedCount++;
-        }
-        if (duplicate) {
-          duplicateCount++;
-          seen.delete(key);
-        }
-      });
-
-      if (!isApplyingSnapshotRef.current && successCount > 0) {
+      if (successCount > 0) {
         setTimeout(() => {
-          const updatedPlan = plans.find((p) => p.id === activePlanId) || activePlan;
-          const after = history.createSnapshot({
-            rotation,
-            magneticDeclination,
-            errorThreshold,
-            isDrawingMode,
-            axes,
-            activePlan: updatedPlan ?? null,
-          });
+          const after = getCurrentSnapshot();
 
           history.recordOperation({
             type: 'batch_input',
@@ -994,38 +906,25 @@ function App() {
     },
     [
       activePlanId,
-      addMeasurement,
       activePlan,
-      plans,
+      batchAddMeasurements,
       history,
       getCurrentSnapshot,
-      rotation,
+      compass.rotation,
       magneticDeclination,
       errorThreshold,
-      isDrawingMode,
-      axes,
+      compass.isDrawingMode,
+      compass.axes,
     ]
   );
 
   useEffect(() => {
     if (activePlan) {
-      setAxes((prev) =>
-        prev.map((a) => {
-          const measurement = activePlan.measurements.find((m) => m.axisId === a.id);
-          return measurement
-            ? { ...a, label: measurement.axisLabel }
-            : a;
-        })
-      );
-    }
-  }, [activePlan?.id]);
-
-  useEffect(() => {
-    if (activePlan) {
+      compass.updateAxisLabelsFromPlan(activePlan);
       lastDeclinationRef.current = activePlan.magneticDeclination;
       lastThresholdRef.current = activePlan.errorThreshold;
     }
-  }, [activePlan?.magneticDeclination, activePlan?.errorThreshold]);
+  }, [activePlan?.id, activePlan?.magneticDeclination, activePlan?.errorThreshold, compass, activePlan]);
 
   const headerTitle = (
     <Group gap="sm">
@@ -1154,7 +1053,7 @@ function App() {
                   size="md"
                   leftSection={<IconTrash size={18} />}
                   onClick={handleClearAxes}
-                  disabled={axes.length === 0}
+                  disabled={compass.axes.length === 0}
                 >
                   清除轴线
                 </Button>
@@ -1187,13 +1086,13 @@ function App() {
                       <Badge
                         size="md"
                         variant="filled"
-                        color={isDrawingMode ? 'green' : 'blue'}
+                        color={compass.isDrawingMode ? 'green' : 'blue'}
                       >
-                        {isDrawingMode ? '绘制模式' : '旋转模式'}
+                        {compass.isDrawingMode ? '绘制模式' : '旋转模式'}
                       </Badge>
-                      {axes.length > 0 && (
+                      {compass.axes.length > 0 && (
                         <Badge size="md" variant="light">
-                          {axes.length} 条轴线
+                          {compass.axes.length} 条轴线
                         </Badge>
                       )}
                     </Group>
@@ -1203,13 +1102,13 @@ function App() {
 
                   <CompassDial
                     size={560}
-                    rotation={rotation}
+                    rotation={compass.rotation}
                     onRotationChange={handleRotationChange}
-                    isDrawingMode={isDrawingMode}
+                    isDrawingMode={compass.isDrawingMode}
                     onAxisDrawn={handleAxisDrawn}
-                    axes={axes}
+                    axes={compass.axes}
                     magneticDeclination={magneticDeclination}
-                    onPreviewAngleChange={setPreviewAngle}
+                    onPreviewAngleChange={compass.setPreviewAngle}
                     environmentElements={envElements}
                     showEnvironmentOverlay={showEnvOverlay}
                     risks={envAnalysis.risks}
@@ -1220,7 +1119,7 @@ function App() {
                       <Tooltip key={angle} label={`${angle}°`} withArrow>
                         <Button
                           size="xs"
-                          variant={rotation === angle ? 'filled' : 'light'}
+                          variant={compass.rotation === angle ? 'filled' : 'light'}
                           onClick={() => handleRotationChange(angle)}
                         >
                           {angle}°
@@ -1231,16 +1130,16 @@ function App() {
                 </Paper>
 
                 <ControlPanel
-                  rotation={rotation}
+                  rotation={compass.rotation}
                   onRotationChange={handleRotationChange}
                   magneticDeclination={magneticDeclination}
                   onDeclinationChange={handleDeclinationChange}
                   errorThreshold={errorThreshold}
                   onErrorThresholdChange={handleErrorThresholdChange}
-                  isDrawingMode={isDrawingMode}
+                  isDrawingMode={compass.isDrawingMode}
                   onDrawingModeChange={handleDrawingModeToggle}
-                  bearingResult={bearingResult}
-                  previewAngle={previewAngle}
+                  bearingResult={compass.bearingResult}
+                  previewAngle={compass.previewAngle}
                 />
               </Stack>
             </div>
@@ -1270,18 +1169,18 @@ function App() {
       </AppShell.Main>
 
       <Modal
-        opened={saveModalOpen}
+        opened={compass.saveModalOpen}
         onClose={handleCancelSave}
         title="保存测量记录"
         centered
         size="md"
       >
         <Stack gap="md">
-          {selectedAxisResult && (
-            <Paper p="md" radius="md" withBorder bg={selectedAxisResult.exceedsThreshold ? 'red.0' : 'green.0'}>
+          {compass.selectedAxisResult && (
+            <Paper p="md" radius="md" withBorder bg={compass.selectedAxisResult.exceedsThreshold ? 'red.0' : 'green.0'}>
               <Group justify="space-between" mb="sm">
                 <Text fw={600}>测量预览</Text>
-                {selectedAxisResult.exceedsThreshold ? (
+                {compass.selectedAxisResult.exceedsThreshold ? (
                   <Badge color="red" variant="filled" size="sm">
                     误差超限!
                   </Badge>
@@ -1297,7 +1196,7 @@ function App() {
                     校正方位
                   </Text>
                   <Text fw={700} size="lg">
-                    {formatAngle(selectedAxisResult.correctedBearing)}
+                    {formatAngle(compass.selectedAxisResult.correctedBearing)}
                   </Text>
                 </div>
                 <div>
@@ -1306,14 +1205,14 @@ function App() {
                   </Text>
                   <Group gap={4}>
                     <Text fw={700} size="lg">
-                      {selectedAxisResult.mountain.name}山
+                      {compass.selectedAxisResult.mountain.name}山
                     </Text>
                     <Badge
                       size="xs"
                       variant="filled"
                       style={{ backgroundColor: 'var(--mantine-color-violet-6)' }}
                     >
-                      {selectedAxisResult.mountain.element}
+                      {compass.selectedAxisResult.mountain.element}
                     </Badge>
                   </Group>
                 </div>
@@ -1322,7 +1221,7 @@ function App() {
                     罗盘读数
                   </Text>
                   <Text fw={600}>
-                    {formatAngle(selectedAxisResult.compassReading)}
+                    {formatAngle(compass.selectedAxisResult.compassReading)}
                   </Text>
                 </div>
                 <div>
@@ -1331,9 +1230,9 @@ function App() {
                   </Text>
                   <Text
                     fw={600}
-                    c={selectedAxisResult.exceedsThreshold ? 'red' : 'green'}
+                    c={compass.selectedAxisResult.exceedsThreshold ? 'red' : 'green'}
                   >
-                    {selectedAxisResult.errorAmount.toFixed(2)}°
+                    {compass.selectedAxisResult.errorAmount.toFixed(2)}°
                   </Text>
                 </div>
               </SimpleGrid>
@@ -1343,8 +1242,8 @@ function App() {
           <TextInput
             label="轴线标签"
             placeholder="例如：主轴线、东墙、南门..."
-            value={axisLabel}
-            onChange={(e) => setAxisLabel(e.target.value)}
+            value={compass.axisLabel}
+            onChange={(e) => compass.setAxisLabel(e.target.value)}
             withAsterisk
             maxLength={20}
             leftSection={<IconPlus size={16} />}
@@ -1463,7 +1362,7 @@ function App() {
       <BatchInputModal
         opened={batchInputModalOpen}
         onClose={closeBatchInput}
-        rotation={rotation}
+        rotation={compass.rotation}
         magneticDeclination={magneticDeclination}
         errorThreshold={errorThreshold}
         onSubmit={handleBatchInput}

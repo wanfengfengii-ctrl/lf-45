@@ -1,6 +1,11 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
-import type { EnvironmentElement, EnvironmentElementType, MeasurementRecord, EnvironmentAnalysisResult } from '@/types';
-import { generateId, normalizeAngle, analyzeEnvironmentRisks } from '@/utils/compass';
+import type { EnvironmentElement, MeasurementRecord, EnvironmentAnalysisResult } from '@/types';
+import {
+  generateId,
+  normalizeAngle,
+  analyzeEnvironmentRisks,
+  groupElementsByType,
+} from '@/utils/domain';
 
 const STORAGE_KEY = 'compass-environment-elements';
 
@@ -69,16 +74,7 @@ export function useEnvironmentOverlay(measurements: MeasurementRecord[]) {
   }, [measurements, elements]);
 
   const elementsByType = useMemo(() => {
-    const result: Record<EnvironmentElementType, EnvironmentElement[]> = {
-      road: [],
-      water: [],
-      building: [],
-      entrance: [],
-    };
-    elements.forEach((e) => {
-      result[e.type].push(e);
-    });
-    return result;
+    return groupElementsByType(elements);
   }, [elements]);
 
   return {

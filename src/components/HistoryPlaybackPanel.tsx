@@ -84,7 +84,7 @@ import {
   OPERATION_TYPE_LABELS,
   SEVERITY_COLORS,
   formatOperationDescription,
-} from '@/hooks/useHistory';
+} from '@/utils/domain';
 
 interface HistoryPlaybackPanelProps {
   records: OperationRecord[];
