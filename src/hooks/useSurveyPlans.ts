@@ -1,6 +1,12 @@
 import { useState, useCallback, useEffect } from 'react';
 import type { SurveyPlan, MeasurementRecord } from '@/types';
-import { generateId, normalizeAngle } from '@/utils/compass';
+import {
+  generateId,
+  normalizeAngle,
+  calculateBearingResult,
+  getMountainByAngle,
+  angleDifference,
+} from '@/utils/compass';
 
 const STORAGE_KEY = 'compass-survey-plans';
 
@@ -91,15 +97,29 @@ export function useSurveyPlans() {
 
   const updatePlan = useCallback((planId: string, updates: Partial<SurveyPlan>) => {
     setPlans((prev) =>
-      prev.map((p) =>
-        p.id === planId
-          ? {
-              ...p,
-              ...updates,
-              updatedAt: Date.now(),
-            }
-          : p
-      )
+      prev.map((p) => {
+        if (p.id !== planId) return p;
+
+        let updatedMeasurements = p.measurements;
+
+        if (updates.errorThreshold !== undefined && updates.errorThreshold !== p.errorThreshold) {
+          const newThreshold = updates.errorThreshold;
+          updatedMeasurements = p.measurements.map((m) => {
+            const exceedsThreshold = m.errorAmount > newThreshold || m.errorAmount > 7.5;
+            return {
+              ...m,
+              exceedsThreshold,
+            };
+          });
+        }
+
+        return {
+          ...p,
+          ...updates,
+          measurements: updatedMeasurements,
+          updatedAt: Date.now(),
+        };
+      })
     );
   }, []);
 
@@ -112,9 +132,21 @@ export function useSurveyPlans() {
 
         const updatedMeasurements = p.measurements.map((m) => {
           const newCorrected = normalizeAngle(m.correctedBearing + delta);
+          const mountain = getMountainByAngle(newCorrected);
+          const errorAmount = angleDifference(newCorrected, mountain.midAngle);
+          const exceedsThreshold = errorAmount > p.errorThreshold || errorAmount > 7.5;
+          const errorRange: [number, number] = [
+            normalizeAngle(newCorrected - errorAmount),
+            normalizeAngle(newCorrected + errorAmount),
+          ];
           return {
             ...m,
             correctedBearing: newCorrected,
+            mountainName: mountain.name,
+            mountainElement: mountain.element,
+            errorAmount,
+            errorRange,
+            exceedsThreshold,
           };
         });
 
@@ -203,6 +235,30 @@ export function useSurveyPlans() {
     );
   }, []);
 
+  const duplicatePlan = useCallback((planId: string, newName?: string): SurveyPlan | null => {
+    const sourcePlan = plans.find((p) => p.id === planId);
+    if (!sourcePlan) return null;
+
+    const newPlan: SurveyPlan = {
+      id: generateId(),
+      name: newName || `${sourcePlan.name} (副本)`,
+      description: sourcePlan.description,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      magneticDeclination: sourcePlan.magneticDeclination,
+      errorThreshold: sourcePlan.errorThreshold,
+      measurements: sourcePlan.measurements.map((m) => ({
+        ...m,
+        id: generateId(),
+        timestamp: Date.now(),
+      })),
+      isActive: false,
+    };
+
+    setPlans((prev) => [...prev, newPlan]);
+    return newPlan;
+  }, [plans]);
+
   return {
     plans,
     activePlan,
@@ -215,6 +271,7 @@ export function useSurveyPlans() {
     addMeasurement,
     removeMeasurement,
     clearMeasurements,
+    duplicatePlan,
     isDuplicateMeasurement,
   };
 }

@@ -47,8 +47,6 @@ import {
   formatAngle,
   formatTimestamp,
   ELEMENT_COLORS,
-  generateId,
-  normalizeAngle,
 } from '@/utils/compass';
 
 interface SurveyPlanManagerProps {
@@ -60,6 +58,7 @@ interface SurveyPlanManagerProps {
   onUpdate: (planId: string, updates: Partial<SurveyPlan>) => void;
   onRemoveMeasurement: (planId: string, recordId: string) => void;
   onClearMeasurements: (planId: string) => void;
+  onDuplicate: (planId: string) => SurveyPlan | null;
 }
 
 export const SurveyPlanManager: React.FC<SurveyPlanManagerProps> = ({
@@ -71,6 +70,7 @@ export const SurveyPlanManager: React.FC<SurveyPlanManagerProps> = ({
   onUpdate,
   onRemoveMeasurement,
   onClearMeasurements,
+  onDuplicate,
 }) => {
   const [createModalOpen, { open: openCreate, close: closeCreate }] = useDisclosure(false);
   const [editModalOpen, { open: openEdit, close: closeEdit }] = useDisclosure(false);
@@ -156,30 +156,22 @@ export const SurveyPlanManager: React.FC<SurveyPlanManagerProps> = ({
   };
 
   const handleDuplicatePlan = (plan: SurveyPlan) => {
-    const newPlan = {
-      ...plan,
-      id: generateId(),
-      name: `${plan.name} (副本)`,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      measurements: plan.measurements.map((m) => ({ ...m, id: generateId() })),
-      isActive: false,
-    };
-    onCreate(newPlan.name, plan.description);
-    const latestPlan = plans[plans.length - 1];
-    if (latestPlan) {
-      onUpdate(latestPlan.id, {
-        magneticDeclination: plan.magneticDeclination,
-        errorThreshold: plan.errorThreshold,
-        measurements: plan.measurements.map((m) => ({ ...m, id: generateId() })),
+    const newPlan = onDuplicate(plan.id);
+    if (newPlan) {
+      notifications.show({
+        title: '复制成功',
+        message: `已创建「${plan.name}」的副本，包含 ${newPlan.measurements.length} 条测量记录`,
+        color: 'blue',
+        icon: <IconCopy size={18} />,
+      });
+    } else {
+      notifications.show({
+        title: '复制失败',
+        message: '无法找到源方案',
+        color: 'red',
+        icon: <IconX size={18} />,
       });
     }
-    notifications.show({
-      title: '复制成功',
-      message: `已创建「${plan.name}」的副本`,
-      color: 'blue',
-      icon: <IconCopy size={18} />,
-    });
   };
 
   const handleExportPlan = (plan: SurveyPlan) => {

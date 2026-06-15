@@ -58,6 +58,7 @@ function App() {
     addMeasurement,
     removeMeasurement,
     clearMeasurements,
+    duplicatePlan,
   } = useSurveyPlans();
 
   const [rotation, setRotation] = useState(0);
@@ -432,6 +433,7 @@ function App() {
                   removeMeasurement(planId, recordId)
                 }
                 onClearMeasurements={clearMeasurements}
+                onDuplicate={duplicatePlan}
               />
             </div>
           </SimpleGrid>
